@@ -1,0 +1,47 @@
+name: navi
+description: Navi — a purpose-aware, voice-ready journey companion.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.12.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^3.4.3
+  go_router: ^18.1.0
+  video_player: ^2.14.1
+  sherpa_onnx: ^1.13.8
+  record: ^7.1.2
+  path_provider: ^2.1.5
+  shared_preferences: ^2.5.5
+  crypto: ^3.0.7
+  # Archived: the previous GLB rendering experiments.
+  # flutter_3d_controller: ^2.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  video_player_platform_interface: ^6.9.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/navi_idle_poster.jpg
+    - assets/images/navi_idle_transparent.png
+    - assets/animations/idle_01_sip.webp
+    - assets/voice/en_small/
+    - assets/videos/idle/idle_01_sip.mp4
+    # Archived GLB and portrait integrations. Source assets are preserved.
+    # - assets/avatars/
+    # - assets/images/navi_orb.webp
+    # - assets/models/navi_interaction_test.glb
+    # - assets/models/navi_bust_original_uv.glb
+    # - assets/models/navi_bust_uvsafe_68k.glb
+    # - assets/models/navi_bust_uvsafe_52k.glb
+  fonts:
+    - family: Syne
+      fonts:
+        - asset: assets/fonts/Syne-Variable.ttf
