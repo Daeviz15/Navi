@@ -23,12 +23,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     with WidgetsBindingObserver {
   final _destination = TextEditingController();
   final _destinationFocus = FocusNode();
+  final _checklistKey = GlobalKey();
   late VoiceSessionController _voice;
   late CompanionController _companion;
 
   @override
   void initState() {
     super.initState();
+    _destination.text = ref.read(journeyDraftProvider).destination;
     WidgetsBinding.instance.addObserver(this);
     _voice = ref.read(voiceSessionProvider.notifier);
     _companion = ref.read(companionProvider.notifier);
@@ -146,19 +148,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     final audioLevel = ref.watch(voiceAudioLevelProvider);
     final companion = ref.watch(companionProvider);
     final draft = ref.watch(journeyDraftProvider);
-    ref.listen(voiceSessionProvider, (previous, next) {
-      if (next.destination != null &&
-          next.destinationRevision != previous?.destinationRevision) {
-        _destination.text = next.destination!;
-        ref.read(journeyDraftProvider.notifier).setDestination(next.destination!);
+    ref.listen(journeyDraftProvider, (previous, next) {
+      if (next.destination != previous?.destination &&
+          _destination.text != next.destination) {
+        _destination.text = next.destination;
       }
-      if (next.checklistRevision != previous?.checklistRevision) {
-        ref.read(journeyDraftProvider.notifier).setCompanionPrep(
-          destination: next.destination,
-          purposeSummary: next.purposeSummary,
-          isCasual: next.isCasual,
-          checklist: next.checklist,
-        );
+      if (next.checklist.isNotEmpty && (previous?.checklist.isEmpty ?? true)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _checklistKey.currentContext != null) {
+            unawaited(
+              Scrollable.ensureVisible(
+                _checklistKey.currentContext!,
+                duration: MediaQuery.disableAnimationsOf(context)
+                    ? Duration.zero
+                    : const Duration(milliseconds: 380),
+                alignment: 0.15,
+              ),
+            );
+          }
+        });
       }
     });
 
@@ -493,9 +501,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                 ],
                               ),
                             ),
-                            if (draft.checklist.isNotEmpty && !draft.isCasual) ...[
+                            if (draft.checklist.isNotEmpty &&
+                                !draft.isCasual) ...[
                               const SizedBox(height: 14),
                               _CompanionChecklistCard(
+                                key: _checklistKey,
                                 purposeSummary: draft.purposeSummary,
                                 checklist: draft.checklist,
                                 checkedItems: draft.checkedItems,
@@ -593,6 +603,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
 class _CompanionChecklistCard extends StatelessWidget {
   const _CompanionChecklistCard({
+    super.key,
     required this.purposeSummary,
     required this.checklist,
     required this.checkedItems,

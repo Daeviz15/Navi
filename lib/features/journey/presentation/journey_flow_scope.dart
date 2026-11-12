@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../location/application/location_controller.dart';
 
@@ -16,9 +17,12 @@ class JourneyFlowScope extends ConsumerStatefulWidget {
 
 class _JourneyFlowScopeState extends ConsumerState<JourneyFlowScope>
     with WidgetsBindingObserver {
+  late final LocationController _location;
+
   @override
   void initState() {
     super.initState();
+    _location = ref.read(locationControllerProvider.notifier);
     WidgetsBinding.instance.addObserver(this);
   }
 
@@ -27,22 +31,25 @@ class _JourneyFlowScopeState extends ConsumerState<JourneyFlowScope>
     // A permission dialog makes Android inactive; only actual backgrounding
     // should cancel acquisition. Resume never prompts permission again.
     if (state == AppLifecycleState.inactive) return;
-    unawaited(
-      ref.read(locationControllerProvider.notifier).setVisible(
-        state == AppLifecycleState.resumed,
-      ),
-    );
+    unawaited(_location.setVisible(state == AppLifecycleState.resumed));
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    unawaited(_location.setVisible(false));
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     ref.watch(locationControllerProvider);
-    return widget.child;
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) context.go('/');
+      },
+      child: widget.child,
+    );
   }
 }

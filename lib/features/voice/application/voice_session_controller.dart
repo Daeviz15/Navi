@@ -45,7 +45,7 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
   int _destinationRevision = 0;
   int _checklistRevision = 0;
   bool _enabled = false;
-  bool _homeVisible = false;
+  final _visibleSurfaces = <String>{};
   bool _foreground = true;
   bool _disposed = false;
   bool _wakeTurn = false;
@@ -54,10 +54,12 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
   String _reply = '';
   String? _destination;
   String? _purposeSummary;
+  Stopwatch? _responseClock;
   List<String> _checklist = const <String>[];
 
   ValueListenable<double> get audioLevel => _audioLevel;
 
+  bool get _homeVisible => _visibleSurfaces.isNotEmpty;
   bool get _shouldRun => _enabled && _homeVisible && _foreground && !_disposed;
 
   @override
@@ -146,9 +148,17 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
 
   /// Scheduled outside widget build/disposal so providers are never mutated
   /// synchronously while the widget tree is being assembled.
-  void setHomeVisible(bool visible) {
-    if (_disposed || visible == _homeVisible) return;
-    _homeVisible = visible;
+  void setHomeVisible(bool visible) => setSurfaceVisible('home', visible);
+
+  void setSurfaceVisible(String owner, bool visible) {
+    if (_disposed) return;
+    final wasVisible = _homeVisible;
+    if (visible) {
+      _visibleSurfaces.add(owner);
+    } else {
+      _visibleSurfaces.remove(owner);
+    }
+    if (wasVisible == _homeVisible) return;
     _prepareVisibleSpeech();
     _invalidate();
     Future.microtask(() {
@@ -268,11 +278,7 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
             run.prepareOutput();
             await run.whileActive(run.speech.initialize());
             if (!_current(run, generation)) return;
-            await _listen(
-              run,
-              generation,
-              wakeOnly: _services.wakeRequired,
-            );
+            await _listen(run, generation, wakeOnly: _services.wakeRequired);
             if (_current(run, generation)) {
               _startupDeadline?.cancel();
               developer.log(
@@ -352,6 +358,7 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
       },
     );
     _rawTranscript = '';
+    _responseClock = null;
     _wakeTurn = !wakeOnly && !_services.wakeRequired;
     _publish(wakeOnly ? VoicePhase.armed : VoicePhase.listening);
     _deadline?.cancel();
@@ -379,6 +386,28 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
   void _speechEvent(_VoiceRun run, int generation, SpeechEvent event) {
     if (!_current(run, generation)) return;
     switch (event) {
+      case SpeechStarted():
+        if (state.phase != VoicePhase.listening) return;
+        _deadline?.cancel();
+        _deadline = Timer(const Duration(seconds: 35), () {
+          unawaited(_fail(run, generation, VoiceFailure.utteranceTooLong));
+        });
+      case TranscriptionStarted():
+        if (state.phase != VoicePhase.listening) return;
+        _deadline?.cancel();
+        _reply = '';
+        _responseClock = Stopwatch()..start();
+        _publish(VoicePhase.transcribing);
+        _deadline = Timer(const Duration(seconds: 12), () {
+          unawaited(_fail(run, generation, VoiceFailure.unavailable));
+        });
+      case ListeningResumed():
+        if (state.phase != VoicePhase.transcribing) return;
+        _deadline?.cancel();
+        _publish(VoicePhase.listening);
+        _deadline = Timer(commandTimeout, () {
+          if (_current(run, generation)) unawaited(setEnabled(false));
+        });
       case WakeDetected():
         if (state.phase != VoicePhase.armed) return;
         _wakeTurn = true;
@@ -392,11 +421,17 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
           }
         });
       case TranscriptChanged(:final text):
-        if (state.phase != VoicePhase.listening) return;
+        if (state.phase != VoicePhase.listening &&
+            state.phase != VoicePhase.transcribing) {
+          return;
+        }
         _rawTranscript = text;
-        _publish(VoicePhase.listening);
+        _publish(state.phase);
       case UtteranceEnded(:final text):
-        if (state.phase != VoicePhase.listening) return;
+        if (state.phase != VoicePhase.listening &&
+            state.phase != VoicePhase.transcribing) {
+          return;
+        }
         if (!_wakeTurn && text.trim().isEmpty) {
           if (!_services.wakeRequired) {
             unawaited(setEnabled(false));
@@ -420,6 +455,13 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
     if (event.type == OutputEventType.started &&
         state.phase == VoicePhase.preparingReply) {
       _publish(VoicePhase.speaking);
+      if (const bool.fromEnvironment('NAVI_VOICE_DIAGNOSTICS') &&
+          _responseClock != null) {
+        developer.log(
+          'stage=first_audio responseMs=${_responseClock!.elapsedMilliseconds}',
+          name: 'NAVI.voice',
+        );
+      }
     } else if (event.type == OutputEventType.failed ||
         event.type == OutputEventType.cancelled) {
       unawaited(_fail(run, generation, VoiceFailure.output));
@@ -427,7 +469,9 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
   }
 
   Future<void> _answer(_VoiceRun run, int generation, String text) async {
-    if (!_current(run, generation) || state.phase != VoicePhase.listening) {
+    if (!_current(run, generation) ||
+        (state.phase != VoicePhase.listening &&
+            state.phase != VoicePhase.transcribing)) {
       return;
     }
     _deadline?.cancel();
@@ -444,11 +488,10 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
     try {
       // Releasing the mic prevents Navi from recognizing its own voice.
       _resetAudioLevel();
-      await run.stopMicrophone();
-      if (!_current(run, generation)) return;
       final LocalReply resolved;
       if (response != null) {
         resolved = response;
+        await run.stopMicrophone();
       } else {
         // Play a natural 0.4s backchannel ("Mm-hmm.", "Yeah...", "True...")
         // immediately from RAM while the LLM and TTS prepare the full reply.
@@ -456,9 +499,15 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
             text.trim().split(RegExp(r'\s+')).length >= 3) {
           (run.output as AndroidVoiceOutput).playBackchannelFiller();
         }
-        resolved = await run.whileActive(
-          reasoner.resolve(text, wakeDetected: wakeTurn),
+        // Start reasoning while native microphone shutdown completes. Recognition
+        // is already muted, and output still waits until microphone release.
+        final results = await run.whileActive(
+          Future.wait<Object?>([
+            reasoner.resolve(text, wakeDetected: wakeTurn),
+            run.stopMicrophone(),
+          ]),
         );
+        resolved = results.first as LocalReply;
         if (!_current(run, generation)) return;
         _applyReply(resolved);
         _publish(VoicePhase.preparingReply);
@@ -490,10 +539,7 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
           _destination?.toLowerCase() != response.destination!.toLowerCase();
       _destination = response.destination;
       _destinationRevision++;
-      if (isDifferentDestination &&
-          response.checklist.isEmpty &&
-          response.purposeSummary == null &&
-          !response.isCasual) {
+      if (isDifferentDestination) {
         _purposeSummary = null;
         _isCasual = false;
         _checklist = const <String>[];
@@ -505,9 +551,11 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
         response.isCasual) {
       _purposeSummary = response.purposeSummary ?? _purposeSummary;
       _isCasual = response.isCasual;
-      _checklist = response.isCasual
-          ? const <String>[]
-          : List<String>.unmodifiable(response.checklist);
+      if (response.isCasual) {
+        _checklist = const <String>[];
+      } else if (response.checklist.isNotEmpty) {
+        _checklist = List<String>.unmodifiable(response.checklist);
+      }
       _checklistRevision++;
     }
   }

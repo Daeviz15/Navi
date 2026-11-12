@@ -80,3 +80,14 @@ Implemented first slice:
   existing journey overview. It never geocodes a draft or enables navigation.
 - Android reads the ignored local map key at build time; the configuration channel
   exposes presence only. Native map rendering and real location are device checks.
+
+Journey entry refinement:
+- Home collects purpose/checklist; `/initialize` replaces the redundant purpose
+  form with a short code-rendered bus/checklist introduction. `/prepare` redirects
+  to that entry for compatibility.
+- A GoRouter shell (`JourneyFlowScope`) owns location across initialization and
+  `/preview`. It handles foreground lifecycle and explicit cleanup on departure.
+- Initialization checks location only after the introduction, then enters the map
+  without waiting indefinitely for GPS or forcing permission acceptance.
+- The map is a full-screen Navi-styled canvas with an adaptive destination panel,
+  native attribution padding, a custom position marker and options for essentials.

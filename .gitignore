@@ -50,3 +50,6 @@ env.*.json
 !env.example.json
 .env
 .env.*
+!.env.example
+backend/node_modules/
+backend/dist/

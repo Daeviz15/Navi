@@ -88,9 +88,18 @@ abstract interface class CloudHttpTransport {
   void close();
 }
 
+abstract interface class FormCloudHttpTransport {
+  Future<CloudHttpResponse> postForm({
+    required Uri uri,
+    required Map<String, String> fields,
+    Duration timeout = const Duration(seconds: 8),
+  });
+}
+
 final Uint8List _emptyBytes = Uint8List(0);
 
-class DartIoCloudHttpTransport implements CloudHttpTransport {
+class DartIoCloudHttpTransport
+    implements CloudHttpTransport, FormCloudHttpTransport {
   DartIoCloudHttpTransport({
     Duration connectionTimeout = const Duration(seconds: 6),
     this.maxResponseBytes = 262144,
@@ -100,6 +109,25 @@ class DartIoCloudHttpTransport implements CloudHttpTransport {
   final HttpClient _client;
   final int maxResponseBytes;
   bool _closed = false;
+
+  @override
+  Future<CloudHttpResponse> postForm({
+    required Uri uri,
+    required Map<String, String> fields,
+    Duration timeout = const Duration(seconds: 8),
+  }) {
+    if (_closed) throw const SocketException('HTTP transport is closed');
+    return _send(
+      uri: uri,
+      headers: const {
+        HttpHeaders.contentTypeHeader: 'application/x-www-form-urlencoded',
+      },
+      payload: Uint8List.fromList(
+        utf8.encode(Uri(queryParameters: fields).query),
+      ),
+      timeout: timeout,
+    );
+  }
 
   @override
   Future<CloudHttpResponse> postMultipart({
@@ -243,4 +271,3 @@ class DartIoCloudHttpTransport implements CloudHttpTransport {
     _client.close(force: true);
   }
 }
-

@@ -43,6 +43,7 @@ class CompanionController extends Notifier<CompanionFrame> {
   late VoicePhase _voicePhase;
   Timer? _quietTimer, _gestureDeadline;
   bool _visible = false, _reduceMotion = false, _disposed = false;
+  final _visibleSurfaces = <String>{};
   String _previousIdle = NaviClips.sip.id;
   DateTime? _lastTap;
 
@@ -87,11 +88,20 @@ class CompanionController extends Notifier<CompanionFrame> {
       !_disposed &&
       (_voicePhase == VoicePhase.off || _voicePhase == VoicePhase.armed);
 
-  void setVisible(bool visible) {
-    if (_disposed || _visible == visible) return;
-    _visible = visible;
+  void setVisible(bool visible) => setSurfaceVisible('home', visible);
+
+  void setSurfaceVisible(String owner, bool visible) {
+    if (_disposed) return;
+    if (visible) {
+      _visibleSurfaces.add(owner);
+    } else {
+      _visibleSurfaces.remove(owner);
+    }
+    final nowVisible = _visibleSurfaces.isNotEmpty;
+    if (_visible == nowVisible) return;
+    _visible = nowVisible;
     _quietTimer?.cancel();
-    if (!visible) {
+    if (!_visible) {
       _gestureDeadline?.cancel();
       return;
     }
@@ -159,6 +169,7 @@ class CompanionController extends Notifier<CompanionFrame> {
   CompanionActivity _activity(VoicePhase phase) => switch (phase) {
     VoicePhase.listening => CompanionActivity.listening,
     VoicePhase.preparing ||
+    VoicePhase.transcribing ||
     VoicePhase.preparingReply => CompanionActivity.thinking,
     VoicePhase.speaking => CompanionActivity.speaking,
     _ => CompanionActivity.idle,

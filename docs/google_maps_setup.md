@@ -58,12 +58,17 @@ use. Existing voice configuration is outside this milestone's scope.
 
 ## Where to find the map
 
-Enter/say a destination, continue through the purpose screen, and open Journey
-overview. The Lagos map appears below the travel mode options. Tap **Use my
-location** to request foreground permission and start a high-accuracy stream.
+Enter/say a destination on Home, then tap **Let’s go together**. A short bus
+animation circles the checklist already collected on Home (or a travel-light
+card for casual trips). After the animation, Navi checks location permission,
+prompts only if it needs permission, and opens the full-screen map automatically.
+Declining permission still opens the map with an optional recovery action.
+There is no second purpose-selection screen.
 
 - The initial Lagos centre is a map viewport, not the user's location.
-- No location permission is requested merely by opening the app or preview.
+- Home does not request location. Starting the journey entry flow is the explicit
+  opt-in; the permission check happens after the introduction. Existing grants
+  are reused. Backing out cancels the pending handoff.
 - A usable fix has an estimated position marker and an uncertainty circle.
 - Approximate permission or poor accuracy shows an uncertainty area without a
   precise position marker. Settings lets the user review precise access.
@@ -74,8 +79,15 @@ location** to request foreground permission and start a high-accuracy stream.
   permission states have separate recovery paths.
 - Camera movement does not follow every fix. First usable acquisition can centre
   once if the user has not touched the map; Re-centre is an explicit action.
-- Debug builds expose an optional diagnostics panel for uncertainty and reading age.
-- Map notices are accessible; the native Google logo/attribution remains visible.
+- The map has Navi dark/light styling, quieter business labels and a custom
+  position marker. Native attribution is preserved, with map viewport padding
+  measured from the actual bottom panel so controls do not obscure it.
+- Map options contains notices, the existing checklist and debug-only location
+  diagnostics. The checklist and checked items survive the transition.
+- A journey-flow scope owns acquisition across initialization -> map. It releases
+  tracking when leaving that flow; initialization and map do not start two streams.
+- Reduced motion skips the bus lap. Backgrounding pauses the introduction and
+  never initiates a permission prompt while the app is hidden.
 
 This version does not resolve the destination to coordinates, draw a real route,
 issue stop alerts, or keep navigation running while the screen is locked. Bus and
@@ -89,7 +101,7 @@ Before closing the map/location milestone, record results for:
 
 - [ ] Native map loads with the restricted key on TECNO KI7.
 - [ ] Dark/light maps remain readable and attribution is unobstructed.
-- [ ] Permission is requested only after Use my location.
+- [ ] Permission is requested after the bus introduction; existing grants are reused.
 - [ ] Precise permission yields fresh samples outdoors; inspect reported uncertainty.
 - [ ] Approximate-only permission remains clearly approximate.
 - [ ] Denial, permanent denial and settings return recover without repeated prompts.
@@ -98,6 +110,9 @@ Before closing the map/location milestone, record results for:
 - [ ] Pan/zoom does not fight repeated automatic camera updates; Re-centre works.
 - [ ] Background/foreground rechecks access; leaving preview releases tracking.
 - [ ] Representative compact layouts and larger text remain usable.
+- [ ] Back from initialization or map returns Home without repeating the purpose question.
+- [ ] Checklist state survives initialization, map and the map's essentials sheet.
+- [ ] Google attribution remains above the destination panel in both orientations.
 
 No field positioning accuracy or stop-guidance reliability has been established yet.
 Pilot corridor data, service-area policy and route API contracts remain Phase 0 work.

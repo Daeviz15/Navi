@@ -31,19 +31,27 @@ class JourneyController extends Notifier<JourneyDraft> {
     required bool isCasual,
     required List<String> checklist,
   }) {
+    final sameDestination =
+        destination == null ||
+        destination.trim().toLowerCase() == state.destination.toLowerCase();
     final nextPurpose = isCasual
         ? JourneyPurpose.visit
         : (checklist.isNotEmpty ? JourneyPurpose.errand : state.purpose);
     state = state.copyWith(
-      destination:
-          destination != null && destination.trim().isNotEmpty
+      destination: destination != null && destination.trim().isNotEmpty
           ? destination.trim()
           : state.destination,
       purpose: nextPurpose,
-      purposeSummary: purposeSummary?.trim() ?? state.purposeSummary,
+      purposeSummary:
+          purposeSummary?.trim() ??
+          (sameDestination ? state.purposeSummary : ''),
       isCasual: isCasual,
       checklist: List<String>.unmodifiable(checklist),
-      checkedItems: const <String>{},
+      checkedItems: sameDestination && !isCasual
+          ? Set<String>.unmodifiable(
+              state.checkedItems.where(checklist.contains),
+            )
+          : const <String>{},
     );
   }
 

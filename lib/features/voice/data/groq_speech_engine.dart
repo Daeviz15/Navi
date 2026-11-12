@@ -28,12 +28,13 @@ class GroqSpeechEngine implements SpeechEngine {
     CloudHttpTransport? http,
     this.speechThresholdDbfs = -43.0,
     this.silenceThresholdDbfs = -45.0,
-    this.silenceEndpointFrames = 15, // 750 ms (15 * 50 ms frames) for natural pauses
+    this.silenceEndpointFrames =
+        15, // 750 ms (15 * 50 ms frames) for natural pauses
     this.minSpeechFrames = 4, // 200 ms minimum voiced speech
-    this.maxUtteranceBytes = 256000, // 8 seconds at 16 kHz mono PCM16
+    this.maxUtteranceBytes = 1024000, // 32 seconds at 16 kHz mono PCM16
     this.requestTimeout = const Duration(seconds: 10),
-  }) : _apiKey =
-           (apiKey ?? const String.fromEnvironment('GROQ_API_KEY')).trim(),
+  }) : _apiKey = (apiKey ?? const String.fromEnvironment('GROQ_API_KEY'))
+           .trim(),
        _endpoint =
            endpoint ??
            Uri.parse(
@@ -158,11 +159,12 @@ class GroqSpeechEngine implements SpeechEngine {
     }
 
     final readings = _meter.add(bytes);
-    if (!_speechDetected) {
-      for (final reading in readings) {
+    for (final reading in readings) {
+      if (!_speechDetected) {
         if (reading.rmsDbfs >= speechThresholdDbfs) {
           _speechDetected = true;
-          _voicedFrames = 1;
+          _events.add(const SpeechStarted());
+          _voicedFrames = 0;
           _silentFramesAfterSpeech = 0;
           _peakSpeechDbfs = reading.rmsDbfs;
           for (final chunk in _preRoll) {
@@ -170,36 +172,35 @@ class GroqSpeechEngine implements SpeechEngine {
           }
           _preRoll.clear();
           _preRollLength = 0;
-          break;
-        }
-      }
-      if (!_speechDetected) {
-        _retainPreRoll(bytes);
-        return;
-      }
-    } else {
-      for (final reading in readings) {
-        if (reading.rmsDbfs > _peakSpeechDbfs) {
-          _peakSpeechDbfs = reading.rmsDbfs;
-        }
-        // Adaptive silence check: allow a full 20 dB speech dynamic range and
-        // clamp to <= -39 dBFS so softer words or trailing syllables after an
-        // initial loud word are never mistaken for silence mid-sentence.
-        final adaptiveSilenceFloor = (_peakSpeechDbfs - 20.0).clamp(
-          silenceThresholdDbfs,
-          -39.0,
-        );
-        final effectiveSilenceThreshold =
-            adaptiveSilenceFloor > silenceThresholdDbfs
-            ? adaptiveSilenceFloor
-            : silenceThresholdDbfs;
-        if (reading.rmsDbfs >= effectiveSilenceThreshold) {
-          _voicedFrames++;
-          _silentFramesAfterSpeech = 0;
         } else {
-          _silentFramesAfterSpeech++;
+          continue;
         }
       }
+      if (reading.rmsDbfs > _peakSpeechDbfs) {
+        _peakSpeechDbfs = reading.rmsDbfs;
+      }
+      // Adaptive silence check: allow a full 20 dB speech dynamic range and
+      // clamp to <= -39 dBFS so softer words or trailing syllables after an
+      // initial loud word are never mistaken for silence mid-sentence.
+      final adaptiveSilenceFloor = (_peakSpeechDbfs - 20.0).clamp(
+        silenceThresholdDbfs,
+        -39.0,
+      );
+      final effectiveSilenceThreshold =
+          adaptiveSilenceFloor > silenceThresholdDbfs
+          ? adaptiveSilenceFloor
+          : silenceThresholdDbfs;
+      if (reading.rmsDbfs >= effectiveSilenceThreshold) {
+        _voicedFrames++;
+        _silentFramesAfterSpeech = 0;
+      } else {
+        _silentFramesAfterSpeech++;
+      }
+    }
+
+    if (!_speechDetected) {
+      _retainPreRoll(bytes);
+      return;
     }
 
     _speechBuffer.add(bytes);
@@ -209,8 +210,11 @@ class GroqSpeechEngine implements SpeechEngine {
         _silentFramesAfterSpeech >= silenceEndpointFrames;
     final reachedMaxDuration = _speechBuffer.length >= maxUtteranceBytes;
 
-    if (reachedSilenceEndpoint || reachedMaxDuration) {
+    if (reachedSilenceEndpoint) {
       _submitUtterance();
+    } else if (reachedMaxDuration) {
+      // Never interpret a forced prefix as the user's complete instruction.
+      _fail(VoiceFailure.utteranceTooLong);
     }
   }
 
@@ -260,6 +264,7 @@ class GroqSpeechEngine implements SpeechEngine {
   void _submitUtterance() {
     if (_disposed || _transcribing || _speechBuffer.isEmpty) return;
     _transcribing = true;
+    _events.add(const TranscriptionStarted());
     final epoch = _epoch;
     final peakDbfs = _peakSpeechDbfs;
     final pcmBytes = normalizePcm16Mono(_speechBuffer.takeBytes());
@@ -270,9 +275,7 @@ class GroqSpeechEngine implements SpeechEngine {
       try {
         final response = await _http.postMultipart(
           uri: _endpoint,
-          headers: {
-            if (_apiKey.isNotEmpty) 'Authorization': 'Bearer $_apiKey',
-          },
+          headers: {if (_apiKey.isNotEmpty) 'Authorization': 'Bearer $_apiKey'},
           fields: {
             'model': model,
             'language': 'en',
@@ -302,12 +305,13 @@ class GroqSpeechEngine implements SpeechEngine {
         if (_isSilenceHallucination(rawText, peakDbfs)) {
           // Ignore quiet room-noise hallucinations and keep listening in-turn.
           _resetCaptureBuffer();
+          _events.add(const ListeningResumed());
           return;
         }
         final text = LagosGazetteer.normalizeTranscript(rawText);
         if (_diagnostics) {
           developer.log(
-            'engine=groq_whisper latencyMs=${clock.elapsedMilliseconds} audioBytes=${pcmBytes.length} text="$text"',
+            'engine=groq_whisper latencyMs=${clock.elapsedMilliseconds} audioBytes=${pcmBytes.length}',
             name: 'NAVI.voice',
           );
         }
@@ -342,4 +346,3 @@ class GroqSpeechEngine implements SpeechEngine {
     await _events.close();
   }
 }
-

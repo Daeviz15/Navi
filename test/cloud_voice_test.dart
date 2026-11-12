@@ -184,18 +184,21 @@ void main() {
     }
     await Future<void>.delayed(Duration.zero);
     expect(http.multipartCalls, 1);
-    expect(events, [
-      isA<TranscriptChanged>().having(
-        (e) => e.text,
-        'text',
-        'Take me to Lekki Phase 1',
-      ),
-      isA<UtteranceEnded>().having(
-        (e) => e.text,
-        'text',
-        'Take me to Lekki Phase 1',
-      ),
-    ]);
+    expect(
+      events.where((e) => e is TranscriptChanged || e is UtteranceEnded),
+      [
+        isA<TranscriptChanged>().having(
+          (e) => e.text,
+          'text',
+          'Take me to Lekki Phase 1',
+        ),
+        isA<UtteranceEnded>().having(
+          (e) => e.text,
+          'text',
+          'Take me to Lekki Phase 1',
+        ),
+      ],
+    );
   });
 
   test('DeepSeekVoiceAgent parses structured JSON destinations and falls back on error', () async {

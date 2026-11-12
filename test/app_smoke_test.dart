@@ -8,54 +8,60 @@ import 'package:navi/core/widgets/navi_companion.dart';
 import 'package:navi/features/character/presentation/companion_controller.dart';
 import 'package:navi/features/journey/presentation/journey_controller.dart';
 import 'package:navi/features/navigation/data/maps_configuration.dart';
+import 'package:navi/features/location/application/location_controller.dart';
+
+import 'support/fake_location_gateway.dart';
 
 void main() {
   setUp(() {
     naviRouter.go('/');
   });
 
-  testWidgets('plans a destination, chooses a purpose and travel mode', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          mapsConfigurationProvider.overrideWith(
-            (ref) async => MapsConfiguration.missing,
-          ),
-        ],
-        child: const NaviApp(),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.textContaining('Where are we'), findsOneWidget);
-    expect(find.byKey(const ValueKey('navi-cloud-canvas')), findsOneWidget);
+  testWidgets(
+    'initializes from home and opens the map without a purpose screen',
+    (tester) async {
+      tester.view.physicalSize = const Size(1080, 2400);
+      tester.view.devicePixelRatio = 2.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
 
-    await tester.enterText(find.byType(TextFormField), 'MTN office, Ikeja');
-    await tester.testTextInput.receiveAction(TextInputAction.go);
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            locationGatewayProvider.overrideWithValue(FakeLocationGateway()),
+            mapsConfigurationProvider.overrideWith(
+              (ref) async => MapsConfiguration.missing,
+            ),
+          ],
+          child: const NaviApp(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Where are we'), findsOneWidget);
+      expect(find.byKey(const ValueKey('navi-cloud-canvas')), findsOneWidget);
 
-    expect(find.text('What brings you there?'), findsOneWidget);
-    expect(find.text('MTN office, Ikeja'), findsOneWidget);
+      await tester.enterText(find.byType(TextFormField), 'MTN office, Ikeja');
+      await tester.testTextInput.receiveAction(TextInputAction.go);
+      await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Just show me the way'));
-    await tester.pumpAndSettle();
-    expect(find.text('Journey overview'), findsOneWidget);
-    expect(find.text('MTN office, Ikeja'), findsOneWidget);
+      expect(find.text('What brings you there?'), findsNothing);
+      expect(find.byKey(const ValueKey('journey-map-preview')), findsOneWidget);
+      expect(find.text('MTN office, Ikeja'), findsOneWidget);
 
-    await tester.tap(find.text('On foot'));
-    await tester.pumpAndSettle();
-    final selected = tester.widget<ChoiceChip>(
-      find.ancestor(
-        of: find.text('On foot'),
-        matching: find.byType(ChoiceChip),
-      ),
-    );
-    expect(selected.selected, isTrue);
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-  });
+      await tester.tap(find.text('On foot'));
+      await tester.pumpAndSettle();
+      final selected = tester.widget<ChoiceChip>(
+        find.ancestor(
+          of: find.text('On foot'),
+          matching: find.byType(ChoiceChip),
+        ),
+      );
+      expect(selected.selected, isTrue);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('defaults to black and switches themes without losing input', (
     tester,
@@ -95,7 +101,17 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
 
-    await tester.pumpWidget(const ProviderScope(child: NaviApp()));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          locationGatewayProvider.overrideWithValue(FakeLocationGateway()),
+          mapsConfigurationProvider.overrideWith(
+            (ref) async => MapsConfiguration.missing,
+          ),
+        ],
+        child: const NaviApp(),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
@@ -111,7 +127,7 @@ void main() {
     await tester.enterText(find.byType(TextFormField), 'Ikeja');
     await tester.testTextInput.receiveAction(TextInputAction.go);
     await tester.pumpAndSettle();
-    expect(find.text('What brings you there?'), findsOneWidget);
+    expect(find.byKey(const ValueKey('journey-map-preview')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

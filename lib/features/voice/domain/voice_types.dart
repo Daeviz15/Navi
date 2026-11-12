@@ -5,6 +5,7 @@ enum VoicePhase {
   preparing,
   armed,
   listening,
+  transcribing,
   preparingReply,
   speaking,
   suspended,
@@ -18,6 +19,7 @@ enum VoiceFailure {
   microphone,
   interrupted,
   processingOverrun,
+  utteranceTooLong,
   offlineVoiceMissing,
   output,
   startupTimeout,
@@ -31,6 +33,18 @@ class VoiceException implements Exception {
 
 sealed class SpeechEvent {
   const SpeechEvent();
+}
+
+class SpeechStarted extends SpeechEvent {
+  const SpeechStarted();
+}
+
+class TranscriptionStarted extends SpeechEvent {
+  const TranscriptionStarted();
+}
+
+class ListeningResumed extends SpeechEvent {
+  const ListeningResumed();
 }
 
 class WakeDetected extends SpeechEvent {
@@ -93,6 +107,7 @@ class VoiceSessionState {
     VoicePhase.preparing => 'Getting ready to listen on this device…',
     VoicePhase.armed => 'Say “Hey Navi” or “Hi Navi”.',
     VoicePhase.listening => transcript.isEmpty ? 'I’m listening.' : transcript,
+    VoicePhase.transcribing => 'I heard you. One moment…',
     VoicePhase.preparingReply => reply.isEmpty ? 'One moment…' : reply,
     VoicePhase.speaking => reply,
     VoicePhase.suspended => 'Hands-free is paused.',
@@ -107,6 +122,8 @@ class VoiceSessionState {
         'Install an offline English voice in your phone’s speech settings.',
       VoiceFailure.processingOverrun =>
         'Audio processing fell behind. Try again in a quieter place.',
+      VoiceFailure.utteranceTooLong =>
+        'That was a long turn. Try a shorter request so I catch it all.',
       VoiceFailure.interrupted =>
         'The microphone was interrupted. Tap to reconnect.',
       VoiceFailure.model =>

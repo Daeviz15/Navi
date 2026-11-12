@@ -38,8 +38,8 @@ class DeepSeekVoiceAgent implements VoiceReasoner {
     this.useLocalFastPath = false,
     this.fallback = const LocalCommandRouter(),
     this.requestTimeout = const Duration(seconds: 7),
-  }) : _apiKey =
-           (apiKey ?? const String.fromEnvironment('DEEPSEEK_API_KEY')).trim(),
+  }) : _apiKey = (apiKey ?? const String.fromEnvironment('DEEPSEEK_API_KEY'))
+           .trim(),
        _groqApiKey =
            (groqApiKey ?? const String.fromEnvironment('GROQ_API_KEY')).trim(),
        _endpoint =
@@ -61,7 +61,8 @@ class DeepSeekVoiceAgent implements VoiceReasoner {
   static const _maxHistoryMessages = 8;
   static const _sessionMemoryTimeout = Duration(minutes: 3);
 
-  static const _systemPrompt = '''
+  static const _systemPrompt =
+      '''
 You are Navi, a warm, witty, street-smart personal travel and preparation companion in Lagos, Nigeria.
 Respond ONLY with a valid JSON object matching this exact schema:
 {
@@ -163,6 +164,23 @@ ${TripPrepKnowledge.llmPlaybookReference}
       wakeDetected: wakeDetected,
     );
 
+    final hasFastPurpose = (TripPrepKnowledge.matchPurpose(
+      effectiveUtterance,
+      currentDestination: _activeDestination,
+    ) != null);
+
+    if ((_http is DartIoCloudHttpTransport || useLocalFastPath) &&
+        !hasFastPurpose &&
+        const {
+          LocalIntent.greeting,
+          LocalIntent.identity,
+          LocalIntent.gratitude,
+          LocalIntent.acknowledgment,
+        }.contains(local.intent)) {
+      _recordTurn(effectiveUtterance, local);
+      return local;
+    }
+
     if ((_http is DartIoCloudHttpTransport || useLocalFastPath) &&
         _groqApiKey.isEmpty &&
         _apiKey.isEmpty) {
@@ -207,7 +225,8 @@ ${TripPrepKnowledge.llmPlaybookReference}
 
       // Case 1: User stated BOTH destination and purpose in one sentence, OR
       // user is answering the follow-up purpose question for an active destination.
-      if (fastPurpose != null && (fastPlace != null || _activeDestination != null)) {
+      if (fastPurpose != null &&
+          (fastPlace != null || _activeDestination != null)) {
         final targetDestination = fastPlace ?? _activeDestination;
         final fastReply = LocalReply(
           fastPlace != null ? LocalIntent.destination : LocalIntent.purpose,
@@ -285,9 +304,7 @@ ${TripPrepKnowledge.llmPlaybookReference}
       if (canTryDeepSeek && !_disposed) {
         final response = await _http.postJson(
           uri: _endpoint,
-          headers: {
-            if (_apiKey.isNotEmpty) 'Authorization': 'Bearer $_apiKey',
-          },
+          headers: {if (_apiKey.isNotEmpty) 'Authorization': 'Bearer $_apiKey'},
           body: {
             'model': model,
             'temperature': 0.35,
@@ -328,26 +345,31 @@ ${TripPrepKnowledge.llmPlaybookReference}
     String targetModel,
     String cleanedUtterance,
   ) async {
-    final isReasoningModel = targetModel.startsWith('openai/gpt-oss');
-    final response = await _http.postJson(
-      uri: _groqEndpoint,
-      headers: {'Authorization': 'Bearer $_groqApiKey'},
-      body: {
-        'model': targetModel,
-        'temperature': 0.35,
-        'max_tokens': isReasoningModel ? 512 : 240,
-        if (isReasoningModel) 'reasoning_effort': 'low',
-        'response_format': const {'type': 'json_object'},
-        'messages': [
-          const {'role': 'system', 'content': _systemPrompt},
-          ..._history,
-          {'role': 'user', 'content': cleanedUtterance},
-        ],
-      },
-      timeout: requestTimeout,
-    );
-    if (!response.isSuccess) return null;
-    return _parseCompletion(response.body);
+    try {
+      final isReasoningModel = targetModel.startsWith('openai/gpt-oss');
+      final response = await _http.postJson(
+        uri: _groqEndpoint,
+        headers: {'Authorization': 'Bearer $_groqApiKey'},
+        body: {
+          'model': targetModel,
+          'temperature': 0.35,
+          'max_tokens': isReasoningModel ? 512 : 240,
+          if (isReasoningModel) 'reasoning_effort': 'low',
+          'response_format': const {'type': 'json_object'},
+          'messages': [
+            const {'role': 'system', 'content': _systemPrompt},
+            ..._history,
+            {'role': 'user', 'content': cleanedUtterance},
+          ],
+        },
+        timeout: requestTimeout,
+      );
+      if (!response.isSuccess) return null;
+      return _parseCompletion(response.body);
+    } catch (_) {
+      // One provider exception must not skip the configured fallback chain.
+      return null;
+    }
   }
 
   LocalReply? _parseCompletion(String rawBody) {
@@ -400,6 +422,20 @@ ${TripPrepKnowledge.llmPlaybookReference}
           checklist.add(item.trim());
         }
       }
+    }
+
+    if (checklist.isEmpty &&
+        !isCasual &&
+        RegExp(
+          r'\b(?:checklist|list)\b.{0,35}\b(?:ready|pinned|prepared|sorted)\b|\b(?:pinned|prepared|ready)\b.{0,25}\b(?:checklist|list)\b',
+          caseSensitive: false,
+        ).hasMatch(replyText)) {
+      return LocalReply(
+        LocalIntent.clarify,
+        'I’ve noted that. What specific errand are you going for so I can prepare a useful checklist?',
+        destination: validDestination,
+        followUp: true,
+      );
     }
 
     final intent = switch (rawIntent) {

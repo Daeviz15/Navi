@@ -30,6 +30,11 @@ class _JourneyInitializationScreenState
   bool _locationStepDone = false;
   bool _foreground = true;
 
+  bool get _isCurrent =>
+      mounted &&
+      GoRouter.of(context).routeInformationProvider.value.uri.path ==
+          '/initialize';
+
   @override
   void initState() {
     super.initState();
@@ -48,7 +53,9 @@ class _JourneyInitializationScreenState
     _begun = true;
     final reduced = MediaQuery.disableAnimationsOf(context);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || ref.read(journeyDraftProvider).destination.isEmpty) return;
+      if (!mounted || ref.read(journeyDraftProvider).destination.isEmpty) {
+        return;
+      }
       if (reduced) {
         _drive.value = 1;
       } else if (_foreground) {
@@ -64,17 +71,19 @@ class _JourneyInitializationScreenState
   }
 
   Future<void> _advance() async {
-    if (!mounted || !_foreground || !_introFinished || _permissionInFlight) return;
+    if (!_isCurrent || !_foreground || !_introFinished || _permissionInFlight) {
+      return;
+    }
     if (!_locationStepDone) {
       _permissionInFlight = true;
       // enable checks existing permission first. It returns after acquisition
       // starts, not after a GPS fix: a weak signal must not trap this screen.
       await ref.read(locationControllerProvider.notifier).enable();
       _permissionInFlight = false;
-      if (!mounted) return;
+      if (!_isCurrent) return;
       _locationStepDone = true;
     }
-    if (_foreground) context.go('/preview');
+    if (mounted && _foreground) context.go('/preview');
   }
 
   @override
@@ -179,7 +188,9 @@ class _JourneyInitializationScreenState
                             ),
                             const SizedBox(height: 14),
                             Text(
-                              hasChecklist ? 'Your essentials' : 'Travel light.',
+                              hasChecklist
+                                  ? 'Your essentials'
+                                  : 'Travel light.',
                               textAlign: TextAlign.center,
                               style: theme.textTheme.titleMedium,
                             ),
@@ -187,14 +198,18 @@ class _JourneyInitializationScreenState
                             if (hasChecklist)
                               for (final item in draft.checklist)
                                 Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 7),
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 7,
+                                  ),
                                   child: Row(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       Icon(
                                         draft.checkedItems.contains(item)
                                             ? Icons.check_circle_rounded
-                                            : Icons.radio_button_unchecked_rounded,
+                                            : Icons
+                                                  .radio_button_unchecked_rounded,
                                         size: 16,
                                         color: draft.checkedItems.contains(item)
                                             ? scheme.primary
@@ -267,13 +282,25 @@ class _BusOrbitPainter extends CustomPainter {
     final path = Path()
       ..moveTo(rect.center.dx, rect.top)
       ..lineTo(rect.right - radius, rect.top)
-      ..arcToPoint(Offset(rect.right, rect.top + radius), radius: Radius.circular(radius))
+      ..arcToPoint(
+        Offset(rect.right, rect.top + radius),
+        radius: Radius.circular(radius),
+      )
       ..lineTo(rect.right, rect.bottom - radius)
-      ..arcToPoint(Offset(rect.right - radius, rect.bottom), radius: Radius.circular(radius))
+      ..arcToPoint(
+        Offset(rect.right - radius, rect.bottom),
+        radius: Radius.circular(radius),
+      )
       ..lineTo(rect.left + radius, rect.bottom)
-      ..arcToPoint(Offset(rect.left, rect.bottom - radius), radius: Radius.circular(radius))
+      ..arcToPoint(
+        Offset(rect.left, rect.bottom - radius),
+        radius: Radius.circular(radius),
+      )
       ..lineTo(rect.left, rect.top + radius)
-      ..arcToPoint(Offset(rect.left + radius, rect.top), radius: Radius.circular(radius))
+      ..arcToPoint(
+        Offset(rect.left + radius, rect.top),
+        radius: Radius.circular(radius),
+      )
       ..close();
     final metric = path.computeMetrics().first;
     final base = Paint()
@@ -281,7 +308,10 @@ class _BusOrbitPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
     for (double at = 0; at < metric.length; at += 12) {
-      canvas.drawPath(metric.extractPath(at, math.min(at + 4, metric.length)), base);
+      canvas.drawPath(
+        metric.extractPath(at, math.min(at + 4, metric.length)),
+        base,
+      );
     }
     canvas.drawPath(
       metric.extractPath(0, metric.length * progress.value),
@@ -301,16 +331,25 @@ class _BusOrbitPainter extends CustomPainter {
     final tyre = Paint()..color = ink;
     for (final x in [-8.0, 8.0]) {
       canvas.drawRRect(
-        RRect.fromRectAndRadius(Rect.fromCenter(center: Offset(x, 0), width: 4, height: 21), const Radius.circular(2)),
+        RRect.fromRectAndRadius(
+          Rect.fromCenter(center: Offset(x, 0), width: 4, height: 21),
+          const Radius.circular(2),
+        ),
         tyre,
       );
     }
     canvas.drawRRect(
-      RRect.fromRectAndRadius(const Rect.fromLTWH(-17, -9, 34, 18), const Radius.circular(5)),
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(-17, -9, 34, 18),
+        const Radius.circular(5),
+      ),
       Paint()..color = gold,
     );
     canvas.drawRRect(
-      RRect.fromRectAndRadius(const Rect.fromLTWH(8, -6, 4, 12), const Radius.circular(1.5)),
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(8, -6, 4, 12),
+        const Radius.circular(1.5),
+      ),
       tyre,
     );
     for (double x = -12; x < 5; x += 5) {

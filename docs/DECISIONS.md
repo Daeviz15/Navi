@@ -80,3 +80,17 @@ runtime code and backend deployment have not been changed by this planning entry
   the newer 2.19.0 requires a newer SDK. Geolocator 14.1.2 supplies location access.
 - Unit and widget checks cannot establish real map authorization or GPS quality;
   phone checks in [google_maps_setup.md](google_maps_setup.md) remain required.
+
+## 2026-11-12 — Conversation-first journey entry and Navi map styling
+
+- User requested removal of the duplicate purpose screen. Home remains the source
+  of purpose/checklist state; Let’s go together starts an animated bus introduction.
+- After one short lap, check existing location access, request if needed, and open
+  the map automatically. Denial does not trap the user; no GPS fix is fabricated.
+- Preserve the checklist/checked state and location acquisition across the page
+  transition through a journey-scoped owner. Cancel handoff on departure, pause in
+  background, and respect reduced motion.
+- Use a full-screen map with Navi colours in both themes, quieter POIs, custom
+  position marker and controls. Preserve Google's native attribution and notices.
+- The map remains a location preview; this UX change does not create route,
+  geocoding, ETA or stop-guidance capabilities.

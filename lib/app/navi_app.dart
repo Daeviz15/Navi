@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../features/journey/application/voice_journey_bridge.dart';
 
 import '../core/theme/navi_theme.dart';
 import '../core/theme/theme_mode_controller.dart';
@@ -11,6 +12,7 @@ class NaviApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(voiceJourneyBridgeProvider);
     final themeMode = ref.watch(themeModeProvider);
     final isLight = themeMode == ThemeMode.light;
     final systemBackground = isLight ? NaviColors.pearl : NaviColors.midnight;
