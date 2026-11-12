@@ -27,26 +27,8 @@ def create_master_icon(size=1024):
     bg_mask_draw = ImageDraw.Draw(bg_mask)
     bg_mask_draw.rounded_rectangle([pad, pad, s - pad, s - pad], radius=radius, fill=255)
 
-    # Base gradient image (Deep Obsidian / Black #07090E to #121824)
-    bg_grad = Image.new("RGBA", (s, s), (7, 9, 14, 255))
-    grad_draw = ImageDraw.Draw(bg_grad)
-    for y in range(int(pad), int(s - pad)):
-        t = (y - pad) / (s - 2 * pad)
-        # Deep blue-black to rich obsidian slate
-        r = int(7 + 11 * t)
-        g = int(9 + 15 * t)
-        b = int(14 + 22 * t)
-        grad_draw.line([(pad, y), (s - pad, y)], fill=(r, g, b, 255))
-
-    # Subtle radial highlight at center top
-    glow = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    glow_draw = ImageDraw.Draw(glow)
-    cx, cy = s * 0.5, s * 0.35
-    max_r = s * 0.45
-    for r_step in range(int(max_r), 0, -8):
-        alpha = int(22 * (1.0 - (r_step / max_r) ** 1.5))
-        glow_draw.ellipse([cx - r_step, cy - r_step, cx + r_step, cy + r_step], fill=(245, 158, 11, alpha))
-    bg_grad = Image.alpha_composite(bg_grad, glow)
+    # Base background (Pure Black #000000)
+    bg_grad = Image.new("RGBA", (s, s), (0, 0, 0, 255))
 
     # Composite background into squircle
     final_bg = Image.new("RGBA", (s, s), (0, 0, 0, 0))
@@ -319,3 +301,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

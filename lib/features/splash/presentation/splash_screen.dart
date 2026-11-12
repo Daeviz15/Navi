@@ -84,26 +84,15 @@ class _SplashScreenState extends State<SplashScreen>
     final double subtitleOpacity = ((t - 0.86) / 0.12).clamp(0.0, 1.0);
 
     return Scaffold(
-      backgroundColor: const Color(0xFF07090E),
+      backgroundColor: Colors.black,
       body: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: _proceedToHome,
         child: Stack(
           children: [
-            // Ambient subtle background gradient
-            Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: RadialGradient(
-                    center: Alignment.center,
-                    radius: 1.1,
-                    colors: [
-                      const Color(0xFF131A29).withValues(alpha: 0.65),
-                      const Color(0xFF07090E),
-                    ],
-                  ),
-                ),
-              ),
+            // Pure black canvas
+            const Positioned.fill(
+              child: ColoredBox(color: Colors.black),
             ),
 
             // Main custom painted animated word & walking companion
