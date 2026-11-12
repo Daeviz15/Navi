@@ -76,8 +76,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       return;
     }
     ref.read(journeyDraftProvider.notifier).setDestination(destination);
+    _destinationFocus.unfocus();
     _voice.suspendForNavigation();
-    context.go('/prepare');
+    context.go('/initialize');
   }
 
   Future<void> _toggleHandsFree() => _voice.togglePushToTalk();

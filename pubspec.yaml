@@ -10,7 +10,9 @@ dependencies:
   flutter:
     sdk: flutter
   flutter_riverpod: ^3.4.3
+  geolocator: ^14.1.2
   go_router: ^18.1.0
+  google_maps_flutter: ^2.18.1
   record: ^7.1.2
   shared_preferences: ^2.5.5
 

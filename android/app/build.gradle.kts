@@ -1,8 +1,26 @@
+import groovy.json.JsonSlurper
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
+
+// Local developer configuration remains ignored by Git. CI can supply the key
+// through an environment variable without creating env.json for this purpose.
+val mapsConfigFile = rootProject.file("../env.json")
+val mapsEnvironmentKey = providers.environmentVariable("GOOGLE_MAPS_API_KEY")
+    .orElse(providers.environmentVariable("GOOGLE_MAPS_API"))
+val mapsApiKey = mapsEnvironmentKey.orNull?.trim().takeUnless { it.isNullOrEmpty() }
+    ?: run {
+        val config = if (mapsConfigFile.exists()) {
+            @Suppress("UNCHECKED_CAST")
+            (JsonSlurper().parseText(mapsConfigFile.readText(Charsets.UTF_8).removePrefix("\uFEFF")) as? Map<String, Any?>)
+                ?: error("env.json must contain a JSON object")
+        } else emptyMap()
+        (config["GOOGLE_MAPS_API_KEY"] ?: config["GOOGLE_MAPS_API"])
+            ?.toString()?.trim().orEmpty()
+    }
 
 android {
     namespace = "com.example.navi"
@@ -23,6 +41,7 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        manifestPlaceholders["NAVI_MAPS_API_KEY"] = mapsApiKey
     }
 
     buildTypes {

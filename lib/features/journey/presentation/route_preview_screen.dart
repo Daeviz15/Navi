@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/widgets/navi_page.dart';
+import '../../location/application/location_controller.dart';
+import '../../navigation/presentation/journey_map_preview.dart';
 import '../domain/journey_draft.dart';
 import 'journey_controller.dart';
 
@@ -12,6 +14,7 @@ class RoutePreviewScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final draft = ref.watch(journeyDraftProvider);
+    final location = ref.watch(locationControllerProvider);
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     if (draft.destination.isEmpty) {
@@ -93,7 +96,9 @@ class RoutePreviewScreen extends ConsumerWidget {
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              'Not selected yet',
+                              location.hasCurrentFix
+                                  ? location.caption
+                                  : 'Use your location below',
                               style: theme.textTheme.bodyMedium,
                             ),
                           ],
@@ -262,30 +267,7 @@ class RoutePreviewScreen extends ConsumerWidget {
               ],
             ),
             const SizedBox(height: 24),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
-              decoration: BoxDecoration(
-                color: scheme.surface,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: scheme.outlineVariant),
-              ),
-              child: Column(
-                children: [
-                  Icon(Icons.map_outlined, size: 30, color: scheme.secondary),
-                  const SizedBox(height: 14),
-                  Text(
-                    'Your route will appear here',
-                    style: theme.textTheme.titleSmall,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    "Live routes and arrival estimates aren't available yet.",
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.bodySmall,
-                  ),
-                ],
-              ),
-            ),
+            const JourneyMapPreview(),
             const SizedBox(height: 20),
             FilledButton.icon(
               onPressed: null,

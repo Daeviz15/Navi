@@ -49,3 +49,34 @@ lib/
 - Dart SDK >= 3.12.0 required by selected router/state versions.
 
 Verified background guidance: https://docs.flutter.dev/app-architecture/guide
+
+## Lagos map/navigation implementation direction — 2026-11-12
+
+The phased roadmap and acceptance gates are in
+[maps_navigation_plan.md](maps_navigation_plan.md). Android map/foreground location
+now has a development implementation; device validation, backend and active
+navigation remain pending. Setup is in [google_maps_setup.md](google_maps_setup.md).
+
+- Continue the Flutter app at the repository root; add an independently deployed
+  backend under `backend/` as server-backed place lookup begins.
+- Recommended initial service: modular TypeScript HTTP API on Cloud Run. Runtime,
+  framework, authentication and deployment configuration are implementation tasks.
+- Keep location quality, journey progress and stop decisions on the device. The
+  server owns protected place/route calls, usage controls and owned corridor data.
+- Evolve the draft navigation interface into typed place, route, fix, session and
+  event contracts. Preserve Riverpod and the existing journey/preparation flow.
+- Google Maps is the selected map foundation; Lagos transit coverage and reliable
+  corridor-specific stop guidance require separate validation.
+- Location/background execution and spoken guidance need their own device-tested
+  lifecycle. A map widget or server deployment alone does not provide navigation.
+
+Implemented first slice:
+- `LocationGateway` isolates Geolocator and its Android fused-location adapter.
+- `LocationController` is an auto-disposed Riverpod notifier owning foreground
+  subscriptions, permission/recovery state, generation guards and freshness timers.
+- `LocationQualityPolicy` uses reported uncertainty and monotonic sample age for
+  display quality. Its thresholds are not arrival/stop-alert thresholds.
+- `JourneyMapPreview` renders the native map and quality-aware position in the
+  existing journey overview. It never geocodes a draft or enables navigation.
+- Android reads the ignored local map key at build time; the configuration channel
+  exposes presence only. Native map rendering and real location are device checks.

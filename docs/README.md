@@ -1,3 +1,13 @@
+# Navi documentation
+
+- [Product brief](PROJECT_BRIEF.md)
+- [Architecture](ARCHITECTURE.md)
+- [Decisions](DECISIONS.md)
+- [Lagos maps/navigation implementation plan](maps_navigation_plan.md)
+- [Google Maps Android setup and device checks](google_maps_setup.md)
+
+The material below records an earlier character experiment and is retained as history.
+
 # NAVI — Meshy Head/Bust LOD Test (19 October 2026)
 
 ## What this contains

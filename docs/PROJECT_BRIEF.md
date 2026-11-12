@@ -39,3 +39,14 @@ Android-first Flutter prototype; destination → purpose → preview, then real 
 - Battery impact on representative Android devices.
 - Number of interventions/manual map checks needed.
 - Whether pre-departure guidance prevented an unnecessary trip (later).
+
+## Map/navigation implementation scope — 2026-11-12
+
+Google Maps is the initial map foundation. Lagos is the initial geographic scope;
+dependable bus-stop guidance will be enabled incrementally on validated corridors.
+Country-level map coverage is not evidence that a specific bus journey is supported.
+Live position quality, confirmed destinations, route planning and stop guidance
+have separate acceptance gates. No accuracy percentage is promised before testing.
+
+The implementation sequence and app/backend boundaries are recorded in
+[maps_navigation_plan.md](maps_navigation_plan.md).

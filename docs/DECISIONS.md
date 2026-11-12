@@ -40,3 +40,43 @@ All accepted product decisions. Append dated changes; do not overwrite history.
 - Whether production requires a different 3D renderer.
 - Final Blender GLB asset, animation rig, materials, surface hit-testing and actual touch-location-dependent gaze.
 - Whether Navi will load character lazily, suspend rendering during navigation or offer low-motion mode.
+
+## 2026-11-12 — Lagos maps/navigation planning
+
+User direction:
+- Proceed with a sequential, production-oriented map/navigation plan using Google
+  Maps as the initial foundation, with Lagos as the initial geographic scope.
+- Prioritize correct location/stop guidance and explicit uncertainty; do not
+  promise near-100% accuracy without field evidence.
+- Preserve current speech work during map integration. Previously reviewed voice
+  hardening remains a dependency before external rollout.
+
+Recommended implementation direction (planned, not implemented):
+- Keep this repository and root Flutter app; introduce an independently deployable
+  `backend/` for protected place/route calls and service-side controls.
+- Start with one modular TypeScript service on Cloud Run; finalize tooling and
+  deploy configuration when implementing the backend phase.
+- Compute location quality, route progress and stop alerts on the device.
+- Deliver map/location, confirmed places, route preview, foreground guidance,
+  locked-screen lifecycle and voice coordination as separate validated milestones.
+- Keep Lagos bus/walking objectives; use walking to validate routing mechanics,
+  and enable bus guidance only for supported, field-validated corridors.
+
+See [maps_navigation_plan.md](maps_navigation_plan.md) for dependencies, tests,
+acceptance gates, pending inputs and release controls. Cloud resources, credentials,
+runtime code and backend deployment have not been changed by this planning entry.
+
+## 2026-11-12 — First Android map/location implementation
+
+- User authorized proceeding and supplied a local Google Maps key. Support the
+  existing `GOOGLE_MAPS_API` field and the canonical `GOOGLE_MAPS_API_KEY` alias;
+  inject into native Android metadata at build time without checking in its value.
+- Keep the current application ID during development; configure Android app/SHA-1
+  and Maps SDK API restrictions. Production identity/signing remain release work.
+- Add the native map to Journey overview and an explicit foreground location opt-in.
+  Use one Riverpod-owned location stream with uncertainty, freshness and lifecycle
+  guards. Do not enable navigation or stop alerts from this map-only milestone.
+- Google Maps Flutter 2.18.1 is compatible with the current Dart 3.12 toolchain;
+  the newer 2.19.0 requires a newer SDK. Geolocator 14.1.2 supplies location access.
+- Unit and widget checks cannot establish real map authorization or GPS quality;
+  phone checks in [google_maps_setup.md](google_maps_setup.md) remain required.

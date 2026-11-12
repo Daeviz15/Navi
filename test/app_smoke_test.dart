@@ -7,6 +7,7 @@ import 'package:navi/core/theme/navi_theme.dart';
 import 'package:navi/core/widgets/navi_companion.dart';
 import 'package:navi/features/character/presentation/companion_controller.dart';
 import 'package:navi/features/journey/presentation/journey_controller.dart';
+import 'package:navi/features/navigation/data/maps_configuration.dart';
 
 void main() {
   setUp(() {
@@ -16,7 +17,16 @@ void main() {
   testWidgets('plans a destination, chooses a purpose and travel mode', (
     tester,
   ) async {
-    await tester.pumpWidget(const ProviderScope(child: NaviApp()));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          mapsConfigurationProvider.overrideWith(
+            (ref) async => MapsConfiguration.missing,
+          ),
+        ],
+        child: const NaviApp(),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.textContaining('Where are we'), findsOneWidget);
     expect(find.byKey(const ValueKey('navi-cloud-canvas')), findsOneWidget);
@@ -201,54 +211,62 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('shows interactive checklist for errands and hides it for casual trips', (
-    tester,
-  ) async {
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
+  testWidgets(
+    'shows interactive checklist for errands and hides it for casual trips',
+    (tester) async {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
 
-    await tester.pumpWidget(
-      UncontrolledProviderScope(
-        container: container,
-        child: const NaviApp(),
-      ),
-    );
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        UncontrolledProviderScope(container: container, child: const NaviApp()),
+      );
+      await tester.pumpAndSettle();
 
-    expect(find.byKey(const ValueKey('companion-checklist-card')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('companion-checklist-card')),
+        findsNothing,
+      );
 
-    container.read(journeyDraftProvider.notifier).setCompanionPrep(
-      destination: 'MTN office, Ikeja',
-      purposeSummary: 'SIM Registration & NIN',
-      isCasual: false,
-      checklist: const [
-        'NIN slip or Virtual NIN (VNIN)',
-        'Valid Government ID card',
-      ],
-    );
-    await tester.pumpAndSettle();
+      container
+          .read(journeyDraftProvider.notifier)
+          .setCompanionPrep(
+            destination: 'MTN office, Ikeja',
+            purposeSummary: 'SIM Registration & NIN',
+            isCasual: false,
+            checklist: const [
+              'NIN slip or Virtual NIN (VNIN)',
+              'Valid Government ID card',
+            ],
+          );
+      await tester.pumpAndSettle();
 
-    expect(
-      find.byKey(const ValueKey('companion-checklist-card')),
-      findsOneWidget,
-    );
-    expect(find.text('0/2 ready'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('companion-checklist-card')),
+        findsOneWidget,
+      );
+      expect(find.text('0/2 ready'), findsOneWidget);
 
-    await tester.ensureVisible(find.text('NIN slip or Virtual NIN (VNIN)'));
-    await tester.tap(find.text('NIN slip or Virtual NIN (VNIN)'));
-    await tester.pumpAndSettle();
-    expect(find.text('1/2 ready'), findsOneWidget);
+      await tester.ensureVisible(find.text('NIN slip or Virtual NIN (VNIN)'));
+      await tester.tap(find.text('NIN slip or Virtual NIN (VNIN)'));
+      await tester.pumpAndSettle();
+      expect(find.text('1/2 ready'), findsOneWidget);
 
-    // Casual trip must not enforce or display a checklist card.
-    container.read(journeyDraftProvider.notifier).setCompanionPrep(
-      destination: 'Yaba',
-      purposeSummary: 'Visiting & Social Outing',
-      isCasual: true,
-      checklist: const ['Should never appear'],
-    );
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('companion-checklist-card')), findsNothing);
-    await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pumpAndSettle();
-  });
+      // Casual trip must not enforce or display a checklist card.
+      container
+          .read(journeyDraftProvider.notifier)
+          .setCompanionPrep(
+            destination: 'Yaba',
+            purposeSummary: 'Visiting & Social Outing',
+            isCasual: true,
+            checklist: const ['Should never appear'],
+          );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('companion-checklist-card')),
+        findsNothing,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    },
+  );
 }
