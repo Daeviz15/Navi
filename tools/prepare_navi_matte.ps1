@@ -1,7 +1,9 @@
 param(
     [string]$Source = 'assets/videos/idle/idle_01_sip.mp4',
     [string]$Animation = 'assets/animations/idle_01_sip.webp',
-    [string]$Poster = 'assets/images/navi_idle_transparent.png'
+    [string]$Poster = 'assets/images/navi_idle_transparent.png',
+    [ValidateRange(0, 2147483647)]
+    [int]$PosterFrame = 0
 )
 
 # Produces a portable alpha animation from the black-background preview clip.
@@ -49,7 +51,7 @@ public static class NaviPreviewMatte {
         }
     }
 
-    public static int Convert(string ffmpeg, string source, string animation, string poster) {
+    public static int Convert(string ffmpeg, string source, string animation, string poster, int posterFrame) {
         string dimensions = Width + "x" + Height;
         using (var decoder = Start(ffmpeg,
             "-hide_banner -loglevel error -i \"" + source +
@@ -112,7 +114,7 @@ public static class NaviPreviewMatte {
                         for (int c = 0; c < 3; c++)
                             rgba[a + c] = alpha == 0 ? (byte)0 : (byte)Math.Min(255, Math.Round(rgb[r + c] / alpha));
                     }
-                    if (frames == 0) SavePoster(rgba, poster);
+                    if (frames == posterFrame) SavePoster(rgba, poster);
                     encoder.StandardInput.BaseStream.Write(rgba, 0, rgba.Length);
                     frames++;
                 }
@@ -121,6 +123,8 @@ public static class NaviPreviewMatte {
                 encoder.WaitForExit();
                 if (decoder.ExitCode != 0 || encoder.ExitCode != 0 || frames == 0)
                     throw new InvalidOperationException("FFmpeg could not finish the transparent animation.");
+                if (posterFrame >= frames)
+                    throw new InvalidOperationException("The selected poster frame is outside the clip.");
                 return frames;
             } finally {
                 if (!decoder.HasExited) decoder.Kill();
@@ -144,6 +148,6 @@ $animationPath = [IO.Path]::GetFullPath((Join-Path (Get-Location) $Animation))
 $posterPath = [IO.Path]::GetFullPath((Join-Path (Get-Location) $Poster))
 [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($animationPath)) | Out-Null
 [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($posterPath)) | Out-Null
-$frames = [NaviPreviewMatte]::Convert((Get-Command ffmpeg).Source, $sourcePath, $animationPath, $posterPath)
+$frames = [NaviPreviewMatte]::Convert((Get-Command ffmpeg).Source, $sourcePath, $animationPath, $posterPath, $PosterFrame)
 Write-Output "Prepared $frames transparent frames at 540x960, 24 fps."
 Get-Item -LiteralPath $animationPath, $posterPath | Select-Object Name, Length

@@ -5,22 +5,13 @@ import 'package:navi/app/navi_app.dart';
 import 'package:navi/app/router.dart';
 import 'package:navi/core/theme/navi_theme.dart';
 import 'package:navi/core/widgets/navi_companion.dart';
-import 'package:video_player_platform_interface/video_player_platform_interface.dart';
-
-import 'support/fake_video_player.dart';
+import 'package:navi/features/character/presentation/companion_controller.dart';
+import 'package:navi/features/journey/presentation/journey_controller.dart';
 
 void main() {
-  late FakeVideoPlayer video;
-  late VideoPlayerPlatform originalVideoPlatform;
-
   setUp(() {
-    originalVideoPlatform = VideoPlayerPlatform.instance;
-    video = FakeVideoPlayer();
-    VideoPlayerPlatform.instance = video;
     naviRouter.go('/');
   });
-
-  tearDown(() => VideoPlayerPlatform.instance = originalVideoPlatform);
 
   testWidgets('plans a destination, chooses a purpose and travel mode', (
     tester,
@@ -28,9 +19,7 @@ void main() {
     await tester.pumpWidget(const ProviderScope(child: NaviApp()));
     await tester.pumpAndSettle();
     expect(find.textContaining('Where are we'), findsOneWidget);
-    expect(video.assets, [NaviCompanion.videoAsset]);
-    expect(video.volumes.values, everyElement(0));
-    expect(video.playing, isNotEmpty);
+    expect(find.byKey(const ValueKey('navi-cloud-canvas')), findsOneWidget);
 
     await tester.enterText(find.byType(TextFormField), 'MTN office, Ikeja');
     await tester.testTextInput.receiveAction(TextInputAction.go);
@@ -38,7 +27,6 @@ void main() {
 
     expect(find.text('What brings you there?'), findsOneWidget);
     expect(find.text('MTN office, Ikeja'), findsOneWidget);
-    expect(video.playing, isEmpty);
 
     await tester.tap(find.text('Just show me the way'));
     await tester.pumpAndSettle();
@@ -72,12 +60,10 @@ void main() {
     expect(theme.colorScheme.primary, NaviColors.gold);
 
     await tester.tap(find.byTooltip('Switch to light mode'));
-    // The transparent character now runs continuously in light mode.
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     theme = Theme.of(tester.element(find.byType(Scaffold).first));
     expect(theme.brightness, Brightness.light);
-    expect(video.playing, isEmpty);
     expect(find.text('Lekki'), findsOneWidget);
 
     await tester.tap(find.byTooltip('Switch to dark mode'));
@@ -86,7 +72,6 @@ void main() {
       Theme.of(tester.element(find.byType(Scaffold).first)).brightness,
       Brightness.dark,
     );
-    expect(video.playing, isNotEmpty);
     expect(tester.takeException(), isNull);
   });
 
@@ -104,6 +89,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
+    expect(
+      tester.getRect(find.text('navi')).right,
+      lessThan(tester.getRect(find.byTooltip('Enable hands-free')).left),
+    );
     await tester.ensureVisible(find.byType(TextFormField));
     await tester.tap(find.byType(TextFormField));
     tester.view.viewInsets = const FakeViewPadding(bottom: 240);
@@ -122,11 +111,21 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           theme: NaviTheme.dark,
-          home: const Scaffold(body: NaviCompanion()),
+          home: const Scaffold(
+            body: NaviCompanion(
+              activity: CompanionActivity.speaking,
+              holdPose: false,
+              repeat: true,
+              engaged: true,
+            ),
+          ),
         ),
       );
-      await tester.pumpAndSettle();
-      expect(video.playing, isNotEmpty);
+      await tester.pump(const Duration(milliseconds: 100));
+      final state = tester.state<NaviCompanionState>(
+        find.byType(NaviCompanion),
+      );
+      expect(state.isAnimating, isTrue);
 
       expect(
         find.descendant(
@@ -138,14 +137,12 @@ void main() {
 
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
       await tester.pump();
-      expect(video.playing, isEmpty);
+      expect(state.isAnimating, isFalse);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-      await tester.pumpAndSettle();
-      expect(video.playing, isNotEmpty);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(state.isAnimating, isTrue);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
-      await tester.runAsync(() => video.disposalCompleted.future);
-      expect(video.disposed, isNotEmpty);
     },
   );
 
@@ -186,13 +183,72 @@ void main() {
       const MaterialApp(
         home: MediaQuery(
           data: MediaQueryData(disableAnimations: true),
-          child: Scaffold(body: NaviCompanion()),
+          child: Scaffold(
+            body: NaviCompanion(
+              activity: CompanionActivity.speaking,
+              holdPose: false,
+              repeat: true,
+              engaged: true,
+            ),
+          ),
         ),
       ),
     );
     await tester.pumpAndSettle();
-    expect(video.playing, isEmpty);
+    final state = tester.state<NaviCompanionState>(find.byType(NaviCompanion));
+    expect(state.isAnimating, isFalse);
     expect(find.byTooltip('Pause Navi animation'), findsNothing);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('shows interactive checklist for errands and hides it for casual trips', (
+    tester,
+  ) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const NaviApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('companion-checklist-card')), findsNothing);
+
+    container.read(journeyDraftProvider.notifier).setCompanionPrep(
+      destination: 'MTN office, Ikeja',
+      purposeSummary: 'SIM Registration & NIN',
+      isCasual: false,
+      checklist: const [
+        'NIN slip or Virtual NIN (VNIN)',
+        'Valid Government ID card',
+      ],
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('companion-checklist-card')),
+      findsOneWidget,
+    );
+    expect(find.text('0/2 ready'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('NIN slip or Virtual NIN (VNIN)'));
+    await tester.tap(find.text('NIN slip or Virtual NIN (VNIN)'));
+    await tester.pumpAndSettle();
+    expect(find.text('1/2 ready'), findsOneWidget);
+
+    // Casual trip must not enforce or display a checklist card.
+    container.read(journeyDraftProvider.notifier).setCompanionPrep(
+      destination: 'Yaba',
+      purposeSummary: 'Visiting & Social Outing',
+      isCasual: true,
+      checklist: const ['Should never appear'],
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('companion-checklist-card')), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
   });
 }

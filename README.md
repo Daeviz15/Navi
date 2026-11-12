@@ -1,31 +1,35 @@
-﻿# Navi
+# Navi
 
-A Flutter travel companion with a compact Syne typeface, muted golden-yellow accents, solid black surfaces by default, and a warm light theme.
+A Flutter travel companion with a compact Syne typeface, muted golden-yellow accents, solid black surfaces by default, a warm light theme, and a procedural volumetric Cloud companion that reacts in real time to user speech.
 
 ## Run
 
 ```sh
 flutter pub get
-flutter run
+flutter run --dart-define=GROQ_API_KEY=your_groq_key --dart-define=DEEPSEEK_API_KEY=your_deepseek_key
 ```
 
-Restart the app after pulling changes to native plugins or bundled assets. The current platform project is Android; the official video player supports Android, iOS, macOS, and web, rather than Windows desktop.
+You can also store your keys in a local git-ignored JSON file (e.g. `env.json`) and run:
+
+```sh
+flutter run --dart-define-from-file=env.json
+```
 
 ## Current experience
 
-- The home screen centers a looping, muted preview of `assets/videos/idle/idle_01_sip.mp4`.
+- Navi renders a procedural, volumetric Cloud companion (`lib/core/widgets/navi_companion.dart`) using a 48-point Catmull-Rom spline contour, 7 internal radial-shaded lobes, core luminescence, and concentric acoustic resonance rings.
+- Live microphone PCM16 audio is metered over a 50 ms window (`lib/features/voice/data/pcm_audio_levels.dart`) with asymmetric attack/release smoothing and fed directly to `NaviCompanion`'s `CustomPainter` via a `ValueListenable<double>` so the Cloud vibrates and billows at 60 fps in response to your voice without rebuilding the widget tree.
 - The top-right appearance control switches between dark and light modes. The preference lasts for the current app session.
-- The character animates without visible playback controls, pauses while the app is in the background, and respects reduced-motion settings. A bundled still frame is used while loading or when playback is unavailable.
-- Light mode uses a transparent animated WebP derived from the same source clip, so Navi blends into the page. A border-connected background matte preserves enclosed dark details. The original MP4 is used in dark mode.
+- Interactions reset the quiet timer. Background screens and reduced-motion settings suppress discretionary gestures.
 - The home wordmark and appearance control stay fixed while the page scrolls.
-- Destination entry, suggested places, purpose selection, and travel-mode selection are interactive. Live navigation and microphone input are still pending.
-- The legacy character lab, GLB benchmark, and performance meter are commented out. Their original source and model files remain available for reference; the 3D dependency and model asset registrations are commented out in `pubspec.yaml`.
+- Tap the microphone icon to start a Push-to-Talk voice turn:
+  - **Speech-to-Text (`GroqSpeechEngine`)**: Streams 16 kHz mono PCM16 audio through a client-side RMS Voice Activity Detector (`-40 dBFS` onset, 750 ms silence endpointing, 300 ms pre-roll ring buffer) and transcribes complete utterances using Groq's `whisper-large-v3-turbo` endpoint (`https://api.groq.com/openai/v1/audio/transcriptions`).
+  - **Conversational & Intent Reasoning (`DeepSeekVoiceAgent`)**: Sends the transcript and available Lagos places to DeepSeek (`deepseek-chat` in strict JSON mode) to produce a concise spoken reply, companion mood, and structured destination action (`select_place`, `clear_place`, `sleep`, or `none`). Falls back automatically to `LocalCommandRouter` when offline or when `DEEPSEEK_API_KEY` is omitted.
+  - **Voice Output (`AndroidVoiceOutput`)**: Speaks the reply via Android's native `TextToSpeech` engine while the Cloud companion animates its speaking cadence, then automatically closes the microphone at the end of a non-follow-up turn so zero background network or battery cost is incurred.
 
 ## Assets
 
-Only the home preview clip is bundled at present. The broader animation-selection system has not been added. See `assets/videos/README.md` for the earlier clip audit and naming history.
-
-`tools/prepare_navi_matte.ps1` regenerates the light-mode animation and transparent poster from the source MP4 using FFmpeg. The derivative has 240 frames at 540 × 960 and 24 fps; the original clip is preserved. Matting is approximate at very dark exterior edges, so future clips should be reviewed against both themes.
+All legacy character videos (`.mp4`), animated `.webp` files, poster images, 3D `.glb` models, and bundled offline speech weights (`moonshine_tiny_en`, `en_small`, `en_commands`, `wake_navi`) have been removed to keep the release APK lightweight.
 
 Syne is bundled in `assets/fonts/` for offline use. Its SIL Open Font License is included alongside the font. Source: https://github.com/google/fonts/tree/main/ofl/syne.
 
@@ -34,7 +38,5 @@ Syne is bundled in `assets/fonts/` for offline use. Its SIL Open Font License is
 ```sh
 flutter analyze
 flutter test
-flutter build apk --debug
+flutter build apk --release --target-platform android-arm64 --split-per-abi
 ```
-
-Widget tests cover the destination flow, theme switching, larger text on a narrow screen with an open keyboard, and video playback lifecycle using a fake video platform. Native video decoding needs a device or emulator.

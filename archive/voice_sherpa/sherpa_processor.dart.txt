@@ -1,0 +1,260 @@
+import 'dart:collection';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:crypto/crypto.dart';
+import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
+
+import '../domain/voice_types.dart';
+
+/// Runs only in the speech isolate. Also usable by the native validation tool.
+class SherpaProcessor {
+  SherpaProcessor._(
+    this._spotter,
+    this._recognizer,
+    this.emit,
+    this._staggeredWake,
+  ) {
+    if (_spotter != null) {
+      _keywordStreams.add(_WakeStream(_spotter.createStream()));
+    }
+  }
+
+  static const sampleRate = 16000;
+  static const preRollSamples = 48000;
+  final sherpa.KeywordSpotter? _spotter;
+  final sherpa.OnlineRecognizer? _recognizer;
+  final void Function(SpeechEvent) emit;
+  final bool _staggeredWake;
+  final _keywordStreams = <_WakeStream>[];
+  int _wakeSamples = 0;
+  sherpa.OnlineStream? _utteranceStream;
+  final _recent = Queue<Float32List>();
+  int _recentSamples = 0;
+  int _utteranceSamples = 0;
+  int? _oddByte;
+  String _lastPartial = '';
+  SpeechMode _mode = SpeechMode.muted;
+
+  static Future<SherpaProcessor> create(
+    String directory,
+    void Function(SpeechEvent) emit, {
+    String? libraryPath,
+    String? commandDirectory,
+    bool staggeredWake = true,
+    double wakeThreshold = .25,
+    double wakeScore = 1.8,
+    String? keywordsFile,
+    bool verifyModels = true,
+    bool wakeOnly = false,
+    bool commandOnly = false,
+  }) async {
+    if (wakeOnly && commandOnly) throw ArgumentError('Choose one speech role');
+    if (verifyModels) await _verify(directory);
+    final commandPath = commandDirectory ?? directory;
+    if (verifyModels && !wakeOnly && commandPath != directory) {
+      await _verify(commandPath);
+    }
+    await sherpa.initBindingsAsync(libraryPath);
+    sherpa.OnlineModelConfig modelAt(String path) => sherpa.OnlineModelConfig(
+      transducer: sherpa.OnlineTransducerModelConfig(
+        encoder: '$path/encoder.int8.onnx',
+        decoder: '$path/decoder.int8.onnx',
+        joiner: '$path/joiner.int8.onnx',
+      ),
+      tokens: '$path/tokens.txt',
+      numThreads: 1,
+      debug: false,
+    );
+    final spotter = commandOnly
+        ? null
+        : sherpa.KeywordSpotter(
+            sherpa.KeywordSpotterConfig(
+              model: modelAt(directory),
+              keywordsFile: keywordsFile ?? '$directory/keywords.txt',
+              keywordsThreshold: wakeThreshold,
+              keywordsScore: wakeScore,
+            ),
+          );
+    try {
+      final recognizer = wakeOnly
+          ? null
+          : sherpa.OnlineRecognizer(
+              sherpa.OnlineRecognizerConfig(
+                model: modelAt(commandPath),
+                enableEndpoint: true,
+                rule1MinTrailingSilence: 1.8,
+                rule2MinTrailingSilence: .7,
+                rule3MinUtteranceLength: 12,
+              ),
+            );
+      return SherpaProcessor._(spotter, recognizer, emit, staggeredWake);
+    } catch (_) {
+      spotter?.free();
+      rethrow;
+    }
+  }
+
+  static Future<void> _verify(String directory) async {
+    final manifest =
+        jsonDecode(await File('$directory/manifest.json').readAsString())
+            as Map<String, dynamic>;
+    for (final entry in (manifest['files'] as Map<String, dynamic>).entries) {
+      final digest = await sha256
+          .bind(File('$directory/${entry.key}').openRead())
+          .first;
+      if (digest.toString() !=
+          (entry.value as Map<String, dynamic>)['sha256']) {
+        throw const VoiceException(VoiceFailure.model);
+      }
+    }
+  }
+
+  void setMode(SpeechMode mode) {
+    _mode = mode;
+    _oddByte = null;
+    _recent.clear();
+    _recentSamples = 0;
+    _utteranceStream?.free();
+    _utteranceStream = null;
+    _utteranceSamples = 0;
+    _lastPartial = '';
+    for (final stream in _keywordStreams) {
+      stream.stream.free();
+    }
+    _keywordStreams.clear();
+    if (_spotter != null) {
+      _keywordStreams.add(_WakeStream(_spotter.createStream()));
+    }
+    _wakeSamples = 0;
+    if (mode == SpeechMode.listening) {
+      _utteranceStream = _recognizer!.createStream();
+    }
+  }
+
+  void acceptPcm(Uint8List bytes) {
+    if (_mode == SpeechMode.muted || bytes.isEmpty) return;
+    // Retain an odd trailing byte instead of assuming native chunk alignment.
+    final input = _oddByte == null
+        ? bytes
+        : Uint8List.fromList([_oddByte!, ...bytes]);
+    _oddByte = input.length.isOdd ? input.last : null;
+    final samples = Float32List(input.length ~/ 2);
+    final data = ByteData.sublistView(input);
+    for (var i = 0; i < samples.length; i++) {
+      samples[i] = data.getInt16(i * 2, Endian.little) / 32768.0;
+    }
+    acceptSamples(samples);
+  }
+
+  void acceptSamples(Float32List samples) {
+    if (_mode == SpeechMode.muted) return;
+    if (_mode == SpeechMode.wake) {
+      final spotter = _spotter!;
+      // Three seconds preserves slower wake pronunciations and continuous
+      // commands. A shorter ring can cut HEY to Y before command decoding.
+      final retained = samples.length > preRollSamples
+          ? Float32List.fromList(
+              samples.sublist(samples.length - preRollSamples),
+            )
+          : samples;
+      _recent.add(retained);
+      _recentSamples += retained.length;
+      while (_recentSamples > preRollSamples && _recent.isNotEmpty) {
+        final first = _recent.removeFirst();
+        final excess = _recentSamples - preRollSamples;
+        if (first.length > excess) {
+          _recent.addFirst(Float32List.fromList(first.sublist(excess)));
+          _recentSamples -= excess;
+        } else {
+          _recentSamples -= first.length;
+        }
+      }
+      // sherpa 1.13.8 can discard the beginning of a wake phrase during its
+      // automatic silence reset (upstream #3990). Two bounded streams start
+      // one second apart and rotate after three seconds, sharing one model.
+      if (_staggeredWake &&
+          _wakeSamples >= sampleRate &&
+          _keywordStreams.length == 1) {
+        _keywordStreams.add(_WakeStream(spotter.createStream()));
+      }
+      _wakeSamples += samples.length;
+      for (final wake in _keywordStreams) {
+        if (_staggeredWake && wake.samples >= sampleRate * 3) {
+          wake.stream.free();
+          wake.stream = spotter.createStream();
+          wake.samples = 0;
+        }
+        wake.samples += samples.length;
+        wake.stream.acceptWaveform(samples: samples, sampleRate: sampleRate);
+        while (spotter.isReady(wake.stream)) {
+          spotter.decode(wake.stream);
+          final keyword = spotter.getResult(wake.stream).keyword;
+          if (keyword.isNotEmpty) {
+            if (_recognizer == null) {
+              _mode = SpeechMode.muted;
+              _recent.clear();
+              _recentSamples = 0;
+              emit(WakeDetected(keyword));
+              return;
+            }
+            _mode = SpeechMode.listening;
+            _utteranceStream = _recognizer.createStream();
+            for (final audio in _recent) {
+              _utteranceStream!.acceptWaveform(
+                samples: audio,
+                sampleRate: sampleRate,
+              );
+              _utteranceSamples += audio.length;
+            }
+            _recent.clear();
+            _recentSamples = 0;
+            emit(WakeDetected(keyword));
+            _decodeUtterance();
+            return;
+          }
+        }
+      }
+    } else {
+      _utteranceStream!.acceptWaveform(
+        samples: samples,
+        sampleRate: sampleRate,
+      );
+      _utteranceSamples += samples.length;
+      _decodeUtterance();
+    }
+  }
+
+  void _decodeUtterance() {
+    final stream = _utteranceStream!;
+    final recognizer = _recognizer!;
+    while (recognizer.isReady(stream)) {
+      recognizer.decode(stream);
+    }
+    final text = recognizer.getResult(stream).text.trim();
+    if (text != _lastPartial) {
+      _lastPartial = text;
+      emit(TranscriptChanged(text));
+    }
+    if (recognizer.isEndpoint(stream) || _utteranceSamples >= sampleRate * 12) {
+      _mode = SpeechMode.muted;
+      emit(UtteranceEnded(text));
+    }
+  }
+
+  void dispose() {
+    _utteranceStream?.free();
+    for (final stream in _keywordStreams) {
+      stream.stream.free();
+    }
+    _spotter?.free();
+    _recognizer?.free();
+  }
+}
+
+class _WakeStream {
+  _WakeStream(this.stream);
+  sherpa.OnlineStream stream;
+  int samples = 0;
+}

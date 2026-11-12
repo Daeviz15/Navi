@@ -3,7 +3,9 @@ package com.example.navi
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioTrack
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -13,8 +15,13 @@ import android.speech.tts.UtteranceProgressListener
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
-/** Installed, offline English TTS. Utterance IDs survive every native callback. */
+/**
+ * In-memory neural PCM16 WAV playback (`AudioTrack`) + Google Neural/Network TTS fallback.
+ * Utterance IDs survive every native callback.
+ */
 class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
     MethodChannel.MethodCallHandler, AudioManager.OnAudioFocusChangeListener {
     private val context = context.applicationContext
@@ -22,6 +29,8 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
     private val main = Handler(Looper.getMainLooper())
     private val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var engine: TextToSpeech? = null
+    private var track: AudioTrack? = null
+    private var completionRunnable: Runnable? = null
     private var initializing: MethodChannel.Result? = null
     private var generation = 0
     private var ready = false
@@ -37,6 +46,25 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "initialize" -> initialize(result)
+            "playFillerWav" -> {
+                val bytes = call.argument<ByteArray>("bytes")
+                if (ready && activeId == null && bytes != null && bytes.size > 44 && requestFocus()) {
+                    playFillerBytes(bytes)
+                }
+                result.success(null)
+            }
+            "playWav" -> {
+                val id = call.argument<String>("id")
+                val bytes = call.argument<ByteArray>("bytes")
+                val fallbackText = call.argument<String>("text")
+                if (!ready || id.isNullOrBlank() || bytes == null || bytes.size <= 44) {
+                    result.error("voice_unavailable", "WAV payload invalid.", null)
+                } else if (!requestFocus()) {
+                    result.error("audio_focus", "Audio is busy.", null)
+                } else {
+                    playWavBytes(id, bytes, fallbackText, result)
+                }
+            }
             "speak" -> {
                 val id = call.argument<String>("id")
                 val text = call.argument<String>("text")
@@ -45,8 +73,12 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
                 } else if (!requestFocus()) {
                     result.error("audio_focus", "Audio is busy.", null)
                 } else {
+                    releasePlayer()
                     activeId = id
-                    val accepted = engine!!.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), id)
+                    val params = Bundle().apply {
+                        putString(TextToSpeech.Engine.KEY_FEATURE_NETWORK_SYNTHESIS, "true")
+                    }
+                    val accepted = engine!!.speak(text, TextToSpeech.QUEUE_FLUSH, params, id)
                     if (accepted == TextToSpeech.ERROR) {
                         activeId = null
                         abandonFocus()
@@ -60,6 +92,121 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
         }
     }
 
+    private fun playWavBytes(
+        id: String,
+        bytes: ByteArray,
+        fallbackText: String?,
+        result: MethodChannel.Result
+    ) {
+        try {
+            releasePlayer()
+            engine?.stop()
+            val sampleRate = ByteBuffer.wrap(bytes, 24, 4)
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .int
+                .coerceIn(8000, 48000)
+            val pcmLength = (bytes.size - 44) and -2
+            if (pcmLength <= 0) throw IllegalArgumentException("Empty PCM payload")
+
+            val format = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(sampleRate)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build()
+            val audioTrack = AudioTrack.Builder()
+                .setAudioAttributes(attributes)
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(pcmLength)
+                .setTransferMode(AudioTrack.MODE_STATIC)
+                .build()
+
+            val written = audioTrack.write(bytes, 44, pcmLength)
+            if (written <= 0) {
+                audioTrack.release()
+                throw IllegalStateException("AudioTrack write failed: $written")
+            }
+
+            activeId = id
+            track = audioTrack
+            audioTrack.play()
+            emit("started", id)
+
+            val durationMs = ((pcmLength.toLong() * 1000L) / (sampleRate.toLong() * 2L)) + 60L
+            val doneTask = Runnable {
+                if (activeId == id) {
+                    releasePlayer()
+                    emit("completed", id)
+                }
+            }
+            completionRunnable = doneTask
+            main.postDelayed(doneTask, durationMs)
+            result.success(null)
+        } catch (_: Exception) {
+            releasePlayer()
+            if (!fallbackText.isNullOrBlank() && engine != null) {
+                activeId = id
+                val accepted = engine!!.speak(fallbackText, TextToSpeech.QUEUE_FLUSH, Bundle(), id)
+                if (accepted != TextToSpeech.ERROR) {
+                    result.success(null)
+                    return
+                }
+            }
+            activeId = null
+            abandonFocus()
+            result.error("voice_output", "WAV playback could not start.", null)
+        }
+    }
+
+    private fun playFillerBytes(bytes: ByteArray) {
+        try {
+            releasePlayer()
+            val sampleRate = ByteBuffer.wrap(bytes, 24, 4)
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .int
+                .coerceIn(8000, 48000)
+            val pcmLength = (bytes.size - 44) and -2
+            if (pcmLength <= 0) return
+
+            val format = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(sampleRate)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build()
+            val audioTrack = AudioTrack.Builder()
+                .setAudioAttributes(attributes)
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(pcmLength)
+                .setTransferMode(AudioTrack.MODE_STATIC)
+                .build()
+
+            if (audioTrack.write(bytes, 44, pcmLength) > 0) {
+                track = audioTrack
+                audioTrack.play()
+            } else {
+                audioTrack.release()
+            }
+        } catch (_: Exception) {
+            releasePlayer()
+        }
+    }
+
+    private fun releasePlayer() {
+        completionRunnable?.let { main.removeCallbacks(it) }
+        completionRunnable = null
+        val current = track
+        track = null
+        if (current != null) {
+            try {
+                if (current.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                    current.stop()
+                }
+            } catch (_: Exception) {}
+            try {
+                current.release()
+            } catch (_: Exception) {}
+        }
+    }
+
     private fun initialize(result: MethodChannel.Result) {
         if (ready) { result.success(null); return }
         if (initializing != null) {
@@ -67,7 +214,8 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
         }
         initializing = result
         val token = ++generation
-        engine = TextToSpeech(context) { status -> main.post {
+        // Prefer Google Speech Services ("com.google.android.tts") for natural neural voices.
+        engine = TextToSpeech(context, { status -> main.post {
             if (generation != token) return@post
             val pending = initializing ?: return@post
             initializing = null
@@ -76,17 +224,33 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
                 pending.error("voice_output", "Speech engine unavailable.", null)
                 return@post
             }
-            val voice = tts.voices.orEmpty().filter {
-                it.locale.language == "en" && !it.isNetworkConnectionRequired &&
+            val voices = tts.voices.orEmpty().filter {
+                it.locale.language == "en" &&
                     !it.features.orEmpty().contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED)
-            }.sortedWith(compareByDescending<android.speech.tts.Voice> {
-                it.locale.country == "NG"
-            }.thenByDescending { it.quality }.thenBy { it.latency }).firstOrNull()
-            if (voice == null || tts.setVoice(voice) == TextToSpeech.ERROR) {
-                pending.error("offline_voice_missing", "Install an offline English voice.", null)
-                return@post
             }
-            tts.setSpeechRate(0.95f)
+            // Prefer high-quality neural/network voices and natural regional accents (NG, GB, US)
+            // instead of forcing the phone's low-footprint offline robotic synthesizer.
+            val voice = voices.sortedWith(
+                compareByDescending<android.speech.tts.Voice> {
+                    it.isNetworkConnectionRequired ||
+                        it.features.orEmpty().contains(TextToSpeech.Engine.KEY_FEATURE_NETWORK_SYNTHESIS) ||
+                        it.name.lowercase().let { n -> n.contains("wavenet") || n.contains("neural") || n.contains("network") }
+                }
+                .thenByDescending { it.quality }
+                .thenByDescending {
+                    when (it.locale.country.uppercase()) {
+                        "US" -> 3
+                        "GB" -> 2
+                        "NG" -> 1
+                        else -> 0
+                    }
+                }
+                .thenBy { it.latency }
+            ).firstOrNull()
+            if (voice != null) {
+                tts.setVoice(voice)
+            }
+            tts.setSpeechRate(1.0f)
             tts.setPitch(1.0f)
             tts.setAudioAttributes(attributes)
             tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
@@ -99,7 +263,7 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
             })
             ready = true
             pending.success(null)
-        } }
+        } }, "com.google.android.tts")
     }
 
     private fun emit(event: String, id: String) { main.post {
@@ -114,6 +278,7 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
     private fun stop() {
         val id = activeId
         activeId = null
+        releasePlayer()
         engine?.stop()
         abandonFocus()
         if (id != null) channel.invokeMethod("cancelled", mapOf("id" to id))
@@ -141,7 +306,10 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
     override fun onAudioFocusChange(change: Int) {
         if (change < 0) {
             val id = activeId
-            stop()
+            activeId = null
+            releasePlayer()
+            engine?.stop()
+            abandonFocus()
             if (id != null) channel.invokeMethod("failed", mapOf("id" to id))
         }
     }

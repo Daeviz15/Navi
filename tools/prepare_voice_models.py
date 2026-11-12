@@ -42,14 +42,18 @@ phrases = ["HEY NAVI", "HI NAVI", "HELLO NAVI"]
 vocabulary = {line.rsplit(" ", 1)[0] for line in (DEST / "tokens.txt").read_text(encoding="utf-8").splitlines()}
 keywords = []
 for phrase in phrases:
-    tokens = tokenizer.encode(phrase, out_type=str)
-    assert set(tokens) <= vocabulary, (phrase, tokens)
-    keywords.append(" ".join(tokens) + " @" + phrase)
+    # Explicit greeting + name only. Alternate pronunciations keep the same
+    # semantic wake label; standalone NAVI and ordinary greetings cannot wake.
+    greeting = phrase.split()[0]
+    for pronunciation in ["NAVI", "NAVY", "NA VEE"]:
+        tokens = tokenizer.encode(greeting + " " + pronunciation, out_type=str)
+        assert set(tokens) <= vocabulary, (phrase, tokens)
+        keywords.append(" ".join(tokens) + " @" + phrase.replace(" ", "_"))
 (DEST / "keywords.txt").write_text("\n".join(keywords) + "\n", encoding="utf-8")
 files["keywords.txt"] = "generated"
 
 manifest = {
-    "id": MODEL + "-int8-navi-v1",
+    "id": MODEL + "-int8-navi-v2",
     "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/" + MODEL + ".tar.bz2",
     "archiveSha256": hashlib.sha256(ARCHIVE.read_bytes()).hexdigest(),
     "sampleRate": 16000,

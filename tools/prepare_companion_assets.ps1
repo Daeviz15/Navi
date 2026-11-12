@@ -1,9 +1,9 @@
 $ErrorActionPreference = 'Stop'
+& "$PSScriptRoot/prepare_listening_pose.ps1"
 $clips = @(
     @{Id='idle_03_bored_blink';Folder='idle'},
     @{Id='idle_07_daydream';Folder='idle'},
     @{Id='idle_06_sideeye';Folder='idle'},
-    @{Id='listening_02_curious';Folder='assistant'},
     @{Id='thinking_01_chin';Folder='assistant'},
     @{Id='speaking_01_explaining';Folder='assistant'},
     @{Id='happy_01_smile';Folder='personality_emotions'}

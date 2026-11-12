@@ -1,0 +1,94 @@
+import 'dart:io';
+import 'dart:ffi';
+import 'dart:typed_data';
+
+import 'package:navi/features/voice/data/sherpa_processor.dart';
+import 'package:navi/features/voice/domain/voice_types.dart';
+import 'package:navi/features/voice/domain/local_command_router.dart';
+
+Future<void> main(List<String> args) async {
+  if (args.isEmpty) throw ArgumentError('Provide a mono 16-bit 16kHz WAV path');
+  if (Platform.isWindows && args.length > 1) {
+    // Prefer the package's matching runtime over Windows' older system DLL.
+    DynamicLibrary.open('${args[1]}/onnxruntime.dll');
+  }
+  final events = <SpeechEvent>[];
+  final startup = Stopwatch()..start();
+  final processor = await SherpaProcessor.create(
+    'assets/voice/en_small',
+    (event) {
+      events.add(event);
+      if (event is WakeDetected) stdout.writeln('wake: ${event.phrase}');
+      if (event is UtteranceEnded) stdout.writeln('final: ${event.text}');
+    },
+    libraryPath: args.length > 1 ? args[1] : null,
+    commandDirectory: 'assets/voice/en_commands',
+  );
+  stdout.writeln('Cold recognition startup: ${startup.elapsedMilliseconds}ms');
+  try {
+    final wav = await File(args.first).readAsBytes();
+    final header = ByteData.sublistView(wav);
+    var offset = 12;
+    Uint8List? pcm;
+    while (offset + 8 <= wav.length) {
+      final name = String.fromCharCodes(wav.sublist(offset, offset + 4));
+      final size = header.getUint32(offset + 4, Endian.little);
+      if (name == 'fmt ') {
+        if (header.getUint16(offset + 8, Endian.little) != 1 ||
+            header.getUint16(offset + 10, Endian.little) != 1 ||
+            header.getUint32(offset + 12, Endian.little) != 16000 ||
+            header.getUint16(offset + 22, Endian.little) != 16) {
+          throw StateError('Expected mono PCM16 at 16000Hz');
+        }
+      }
+      if (name == 'data') {
+        pcm = Uint8List.sublistView(wav, offset + 8, offset + 8 + size);
+        break;
+      }
+      offset += 8 + size + size % 2;
+    }
+    if (pcm == null) throw StateError('No audio');
+    processor.setMode(SpeechMode.wake);
+    final clock = Stopwatch()..start();
+    for (var offset = 0; offset < pcm.length; offset += 3200) {
+      processor.acceptPcm(
+        Uint8List.sublistView(
+          pcm,
+          offset,
+          (offset + 3200).clamp(0, pcm.length),
+        ),
+      );
+    }
+    for (var i = 0; i < 35; i++) {
+      processor.acceptPcm(Uint8List(3200));
+    }
+    stdout.writeln(
+      'Processed ${(pcm.length / 32000).toStringAsFixed(2)} seconds in ${clock.elapsedMilliseconds}ms',
+    );
+    final detected = events.any((event) => event is WakeDetected);
+    final expected = args.length > 2 ? args[2] : null;
+    if (expected == 'negative') {
+      if (detected) throw StateError('Unexpected wake detection');
+    } else {
+      final finals = events.whereType<UtteranceEnded>().toList();
+      if (!detected || finals.isEmpty) {
+        throw StateError('Expected wake and completed utterance');
+      }
+      final reply = const LocalCommandRouter().route(
+        finals.last.text,
+        wakeDetected: detected,
+      );
+      stdout.writeln(
+        'intent: ${reply.intent.name}; destination: ${reply.destination}',
+      );
+      if (expected != null &&
+          reply.intent.name != expected &&
+          !(expected == 'greeting' &&
+              reply.intent == LocalIntent.acknowledgment)) {
+        throw StateError('Expected $expected, received ${reply.intent.name}');
+      }
+    }
+  } finally {
+    processor.dispose();
+  }
+}

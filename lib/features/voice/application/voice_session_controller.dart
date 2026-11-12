@@ -1,47 +1,75 @@
 import 'dart:async';
-import 'dart:typed_data';
+import 'dart:developer' as developer;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../data/android_voice_output.dart';
+import '../data/groq_speech_engine.dart';
+import '../data/pcm_audio_levels.dart';
 import '../domain/local_command_router.dart';
 import '../domain/voice_gateway.dart';
 import '../domain/voice_types.dart';
 import 'voice_dependencies.dart';
 
-final voiceSessionProvider = NotifierProvider<VoiceSessionController, VoiceSessionState>(VoiceSessionController.new);
+final voiceSessionProvider =
+    NotifierProvider<VoiceSessionController, VoiceSessionState>(
+      VoiceSessionController.new,
+    );
+
+/// Exposes live microphone energy [0.0..1.0] as a [ValueListenable] so the
+/// companion cloud can repaint at audio rate without rebuilding widget trees.
+final voiceAudioLevelProvider = Provider<ValueListenable<double>>(
+  (ref) => ref.watch(voiceSessionProvider.notifier).audioLevel,
+);
 
 /// Owns the foreground voice session. Widgets send intent and visibility only.
 /// Session and utterance IDs guard every asynchronous result and native event.
 class VoiceSessionController extends Notifier<VoiceSessionState> {
   static const commandTimeout = Duration(seconds: 14);
   static const followUpTimeout = Duration(seconds: 8);
+  static const audioMeterWindowSamples = 800; // 50 ms at 16 kHz mono PCM16.
   final _commands = const LocalCommandRouter();
+  final _audioMeter = PcmAudioMeter(windowSamples: audioMeterWindowSamples);
+  final _audioLevel = ValueNotifier<double>(0.0);
   late VoiceServices _services;
   _VoiceRun? _run;
   Future<void> _operations = Future.value();
+  Future<void> _preferenceWrites = Future.value();
   Timer? _deadline;
+  Timer? _startupDeadline;
   int _generation = 0;
+  int _runGeneration = -1;
   int _settingsRevision = 0;
   int _utteranceId = 0;
   int _destinationRevision = 0;
+  int _checklistRevision = 0;
   bool _enabled = false;
   bool _homeVisible = false;
   bool _foreground = true;
   bool _disposed = false;
   bool _wakeTurn = false;
+  bool _isCasual = false;
   String _rawTranscript = '';
   String _reply = '';
   String? _destination;
+  String? _purposeSummary;
+  List<String> _checklist = const <String>[];
+
+  ValueListenable<double> get audioLevel => _audioLevel;
 
   bool get _shouldRun => _enabled && _homeVisible && _foreground && !_disposed;
 
   @override
   VoiceSessionState build() {
-    _services = ref.watch(voiceServicesProvider);
+    _services = ref.read(voiceServicesProvider);
     ref.onDispose(() {
       _disposed = true;
       _generation++;
       _deadline?.cancel();
+      _startupDeadline?.cancel();
+      _audioMeter.reset();
+      _audioLevel.dispose();
       final run = _run;
       _run = null;
       if (run != null) unawaited(run.dispose());
@@ -51,6 +79,7 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
   }
 
   Future<void> _restore() async {
+    if (!_services.wakeRequired) return;
     final revision = _settingsRevision;
     try {
       final enabled = await _services.preferences.readEnabled();
@@ -63,128 +92,285 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
     }
   }
 
-  Future<void> setEnabled(bool enabled, {bool requestPermission = false}) async {
+  Future<void> setEnabled(
+    bool enabled, {
+    bool requestPermission = false,
+  }) async {
     if (_disposed) return;
     _settingsRevision++;
     _enabled = enabled;
     _invalidate();
-    _publish(enabled ? (_shouldRun ? VoicePhase.preparing : VoicePhase.suspended) : VoicePhase.off);
+    _publish(
+      enabled
+          ? (_shouldRun ? VoicePhase.preparing : VoicePhase.suspended)
+          : VoicePhase.off,
+    );
     final revision = _settingsRevision;
-    try {
-      await _services.preferences.writeEnabled(enabled);
-    } catch (_) {
-      // The current session still works; no audio or transcript is persisted.
-    }
+    // Disk/plugin latency must not delay microphone startup. Writes remain
+    // ordered so a rapid on/off sequence persists the latest user choice.
+    _preferenceWrites = _preferenceWrites
+        .then((_) => _services.preferences.writeEnabled(enabled))
+        .catchError((Object _) {});
     if (_disposed || revision != _settingsRevision) return;
     await _reconcile(requestPermission: requestPermission);
   }
 
   Future<void> retry() => setEnabled(true, requestPermission: true);
 
+  /// Handles a Push-to-Talk microphone button press across all phases:
+  /// - If off/error: starts a new listening turn.
+  /// - If listening and speech was already captured: flushes the utterance immediately.
+  /// - If speaking: interrupts TTS playback and starts a fresh listening turn.
+  /// - Otherwise: stops the active session.
+  Future<void> togglePushToTalk() async {
+    if (_disposed) return;
+    if (state.phase == VoicePhase.error || !_enabled) {
+      await setEnabled(true, requestPermission: true);
+      return;
+    }
+    if (state.phase == VoicePhase.listening) {
+      final speech = _run?.speech;
+      if (speech is GroqSpeechEngine && speech.flushUtterance()) {
+        return;
+      }
+      await setEnabled(false);
+      return;
+    }
+    if (state.phase == VoicePhase.speaking) {
+      await setEnabled(false);
+      await setEnabled(true, requestPermission: true);
+      return;
+    }
+    await setEnabled(false);
+  }
+
   /// Scheduled outside widget build/disposal so providers are never mutated
   /// synchronously while the widget tree is being assembled.
   void setHomeVisible(bool visible) {
     if (_disposed || visible == _homeVisible) return;
     _homeVisible = visible;
+    _prepareVisibleSpeech();
     _invalidate();
     Future.microtask(() {
       if (!_disposed) unawaited(_reconcile(requestPermission: false));
     });
   }
 
-  void setForeground(bool foreground) {
-    if (_disposed || foreground == _foreground) return;
+  void setForeground(bool foreground, {bool releaseModels = true}) {
+    if (_disposed) return;
+    if (foreground == _foreground) {
+      if (!foreground && releaseModels) _services.coolSpeech?.call();
+      return;
+    }
     _foreground = foreground;
+    if (foreground || releaseModels) _prepareVisibleSpeech();
     _invalidate();
     unawaited(_reconcile(requestPermission: false));
+  }
+
+  void suspendForNavigation() => setHomeVisible(false);
+
+  void _prepareVisibleSpeech() {
+    if (_homeVisible && _foreground) {
+      final warm = _services.warmSpeech;
+      if (warm != null) unawaited(warm().catchError((Object _) {}));
+    } else {
+      _services.coolSpeech?.call();
+    }
+  }
+
+  void _resetAudioLevel() {
+    _audioMeter.reset();
+    if (!_disposed && _audioLevel.value != 0.0) {
+      _audioLevel.value = 0.0;
+    }
+  }
+
+  void _onAudioChunk(_VoiceRun run, int generation, Uint8List bytes) {
+    if (!_current(run, generation)) return;
+    run.speech.addAudio(bytes);
+    final readings = _audioMeter.add(bytes);
+    if (readings.isNotEmpty) {
+      final target = readings.last.normalizedLevel;
+      final current = _audioLevel.value;
+      // Asymmetric envelope follower: fast attack (0.65) for speech onset,
+      // smooth release (0.35) for organic cloud decay.
+      final factor = target >= current ? 0.65 : 0.35;
+      final smoothed = current + (target - current) * factor;
+      _audioLevel.value = smoothed < 0.005 ? 0.0 : smoothed;
+    }
   }
 
   void _invalidate() {
     _generation++;
     _deadline?.cancel();
+    _startupDeadline?.cancel();
+    _resetAudioLevel();
     final run = _run;
     if (run != null) {
       run.cancelled = true;
       run.speech.setMode(SpeechMode.muted);
       unawaited(run.microphone.stop().catchError((Object _) {}));
       unawaited(run.output.stopSpeaking().catchError((Object _) {}));
+      unawaited(run.dispose());
     }
   }
 
   Future<void> _reconcile({required bool requestPermission}) {
     final generation = _generation;
-    _operations = _operations.then((_) async {
-      if (_disposed || generation != _generation) return;
-      final previous = _run;
-      _run = null;
-      await previous?.dispose();
-      if (_disposed || generation != _generation) return;
-      if (!_shouldRun) {
-        _publish(_enabled ? VoicePhase.suspended : VoicePhase.off);
-        return;
-      }
-      final run = _VoiceRun(_services.microphone(), _services.speech(), _services.output());
-      _run = run;
-      _publish(VoicePhase.preparing);
-      try {
-        if (!await run.microphone.hasPermission(request: requestPermission)) {
-          throw const VoiceException(VoiceFailure.permissionDenied);
-        }
-        if (!_current(run, generation)) return;
-        run.speechEvents = run.speech.events.listen((event) => _speechEvent(run, generation, event));
-        run.outputEvents = run.output.events.listen((event) => _outputEvent(run, generation, event));
-        await run.output.initialize();
-        if (!_current(run, generation)) return;
-        await run.speech.initialize();
-        if (!_current(run, generation)) return;
-        await _listen(run, generation, wakeOnly: true);
-      } catch (error) {
-        await _fail(run, generation, _failure(error));
-      } finally {
-        if (!_current(run, generation)) await run.dispose();
-      }
-    }).catchError((Object _) {
-      if (!_disposed && generation == _generation) _publish(VoicePhase.error, failure: VoiceFailure.microphone);
-    });
+    _operations = _operations
+        .then((_) async {
+          if (_disposed || generation != _generation) return;
+          // Visibility and preference restoration can enqueue the same start.
+          // A failed run waits for an explicit retry rather than starting twice.
+          if (_run != null && _runGeneration == generation) return;
+          final previous = _run;
+          _run = null;
+          await previous?.dispose();
+          if (_disposed || generation != _generation) return;
+          if (!_shouldRun) {
+            _publish(_enabled ? VoicePhase.suspended : VoicePhase.off);
+            return;
+          }
+          final run = _VoiceRun(
+            _services.microphone(),
+            _services.speech(),
+            _services.output(),
+          );
+          _run = run;
+          _runGeneration = generation;
+          _publish(VoicePhase.preparing);
+          try {
+            if (!await run.microphone
+                .hasPermission(request: requestPermission)
+                .timeout(
+                  requestPermission
+                      ? const Duration(minutes: 2)
+                      : const Duration(seconds: 3),
+                  onTimeout: () =>
+                      throw const VoiceException(VoiceFailure.startupTimeout),
+                )) {
+              throw const VoiceException(VoiceFailure.permissionDenied);
+            }
+            if (!_current(run, generation)) return;
+            final startup = Stopwatch()..start();
+            _startupDeadline = Timer(_services.startupTimeout, () {
+              unawaited(_fail(run, generation, VoiceFailure.startupTimeout));
+            });
+            run.speechEvents = run.speech.events.listen(
+              (event) => _speechEvent(run, generation, event),
+            );
+            run.outputEvents = run.output.events.listen(
+              (event) => _outputEvent(run, generation, event),
+            );
+            // Output preparation has its own result and deadline. It must not
+            // prevent a ready wake detector from opening capture.
+            run.prepareOutput();
+            await run.whileActive(run.speech.initialize());
+            if (!_current(run, generation)) return;
+            await _listen(
+              run,
+              generation,
+              wakeOnly: _services.wakeRequired,
+            );
+            if (_current(run, generation)) {
+              _startupDeadline?.cancel();
+              developer.log(
+                'Hands-free ready in ${startup.elapsedMilliseconds}ms',
+                name: 'NAVI.voice',
+              );
+            }
+          } catch (error) {
+            await _fail(run, generation, _failure(error));
+          } finally {
+            if (!_current(run, generation)) await run.dispose();
+          }
+        })
+        .catchError((Object _) {
+          if (!_disposed && generation == _generation) {
+            _publish(VoicePhase.error, failure: VoiceFailure.microphone);
+          }
+        });
     return _operations;
   }
 
   bool _current(_VoiceRun run, int generation) =>
-      !_disposed && _shouldRun && !run.cancelled && identical(run, _run) && generation == _generation;
+      !_disposed &&
+      _shouldRun &&
+      !run.cancelled &&
+      identical(run, _run) &&
+      generation == _generation;
 
   void _publish(VoicePhase phase, {VoiceFailure? failure}) {
     if (_disposed) return;
-    state = VoiceSessionState(enabled: _enabled, phase: phase,
-      transcript: _commands.removeWakePhrase(_rawTranscript), reply: _reply,
-      failure: failure, destination: _destination, destinationRevision: _destinationRevision);
+    final cleanedTranscript = _commands.removeWakePhrase(
+      _rawTranscript,
+      wakeDetected: _wakeTurn,
+    );
+    final effectiveTranscript =
+        cleanedTranscript.isEmpty && !_services.wakeRequired
+        ? _rawTranscript.trim()
+        : cleanedTranscript;
+    state = VoiceSessionState(
+      enabled: _enabled,
+      phase: phase,
+      transcript: effectiveTranscript,
+      reply: _reply,
+      failure: failure,
+      destination: _destination,
+      destinationRevision: _destinationRevision,
+      purposeSummary: _purposeSummary,
+      isCasual: _isCasual,
+      checklist: _checklist,
+      checklistRevision: _checklistRevision,
+    );
   }
 
-  Future<void> _listen(_VoiceRun run, int generation, {required bool wakeOnly}) async {
+  Future<void> _listen(
+    _VoiceRun run,
+    int generation, {
+    required bool wakeOnly,
+  }) async {
     if (!_current(run, generation)) return;
+    _resetAudioLevel();
     await run.stopMicrophone();
     if (!_current(run, generation)) return;
     run.speech.setMode(wakeOnly ? SpeechMode.wake : SpeechMode.listening);
     final audio = await run.microphone.start();
-    if (!_current(run, generation)) { await run.microphone.stop(); return; }
-    run.audio = audio.listen(run.speech.addAudio,
-      onError: (Object error) => unawaited(_fail(run, generation, _failure(error))),
+    if (!_current(run, generation)) {
+      await run.microphone.stop();
+      return;
+    }
+    run.audio = audio.listen(
+      (bytes) => _onAudioChunk(run, generation, bytes),
+      onError: (Object error) =>
+          unawaited(_fail(run, generation, _failure(error))),
       onDone: () {
         if (_current(run, generation) && run.audio != null) {
           unawaited(_fail(run, generation, VoiceFailure.interrupted));
         }
-      });
+      },
+    );
     _rawTranscript = '';
-    _wakeTurn = false;
+    _wakeTurn = !wakeOnly && !_services.wakeRequired;
     _publish(wakeOnly ? VoicePhase.armed : VoicePhase.listening);
     _deadline?.cancel();
     if (!wakeOnly) {
-      _deadline = Timer(followUpTimeout, () {
-        if (!_current(run, generation) || state.phase != VoicePhase.listening) return;
+      final timeout = _services.wakeRequired ? followUpTimeout : commandTimeout;
+      _deadline = Timer(timeout, () {
+        if (!_current(run, generation) || state.phase != VoicePhase.listening) {
+          return;
+        }
         if (_rawTranscript.trim().isNotEmpty) {
           unawaited(_answer(run, generation, _rawTranscript));
+        } else if (!_services.wakeRequired) {
+          unawaited(setEnabled(false));
         } else {
-          unawaited(_listen(run, generation, wakeOnly: true).catchError(
-            (Object error) => _fail(run, generation, _failure(error))));
+          unawaited(
+            _listen(run, generation, wakeOnly: true).catchError(
+              (Object error) => _fail(run, generation, _failure(error)),
+            ),
+          );
         }
       });
     }
@@ -200,7 +386,8 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
         _publish(VoicePhase.listening);
         _deadline?.cancel();
         _deadline = Timer(commandTimeout, () {
-          if (_current(run, generation) && state.phase == VoicePhase.listening) {
+          if (_current(run, generation) &&
+              state.phase == VoicePhase.listening) {
             unawaited(_answer(run, generation, _rawTranscript));
           }
         });
@@ -211,8 +398,15 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
       case UtteranceEnded(:final text):
         if (state.phase != VoicePhase.listening) return;
         if (!_wakeTurn && text.trim().isEmpty) {
-          unawaited(_listen(run, generation, wakeOnly: true).catchError(
-            (Object error) => _fail(run, generation, _failure(error))));
+          if (!_services.wakeRequired) {
+            unawaited(setEnabled(false));
+          } else {
+            unawaited(
+              _listen(run, generation, wakeOnly: true).catchError(
+                (Object error) => _fail(run, generation, _failure(error)),
+              ),
+            );
+          }
         } else {
           unawaited(_answer(run, generation, text));
         }
@@ -223,51 +417,117 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
 
   void _outputEvent(_VoiceRun run, int generation, OutputEvent event) {
     if (!_current(run, generation) || event.id != _utteranceId) return;
-    if (event.type == OutputEventType.started && state.phase == VoicePhase.preparingReply) {
+    if (event.type == OutputEventType.started &&
+        state.phase == VoicePhase.preparingReply) {
       _publish(VoicePhase.speaking);
-    } else if (event.type == OutputEventType.failed || event.type == OutputEventType.cancelled) {
+    } else if (event.type == OutputEventType.failed ||
+        event.type == OutputEventType.cancelled) {
       unawaited(_fail(run, generation, VoiceFailure.output));
     }
   }
 
   Future<void> _answer(_VoiceRun run, int generation, String text) async {
-    if (!_current(run, generation) || state.phase != VoicePhase.listening) return;
+    if (!_current(run, generation) || state.phase != VoicePhase.listening) {
+      return;
+    }
     _deadline?.cancel();
     run.speech.setMode(SpeechMode.muted);
     _rawTranscript = text;
-    final response = _commands.route(text);
-    _reply = response.text;
-    if (response.destination != null) {
-      _destination = response.destination;
-      _destinationRevision++;
+    final wakeTurn = _wakeTurn;
+    final reasoner = _services.reasoner;
+    LocalReply? response;
+    if (reasoner is LocalCommandRouter) {
+      response = reasoner.route(text, wakeDetected: wakeTurn);
+      _applyReply(response);
     }
     _publish(VoicePhase.preparingReply);
     try {
       // Releasing the mic prevents Navi from recognizing its own voice.
+      _resetAudioLevel();
       await run.stopMicrophone();
       if (!_current(run, generation)) return;
-      final id = ++_utteranceId;
-      await run.output.speak(response.text, id: id);
+      final LocalReply resolved;
+      if (response != null) {
+        resolved = response;
+      } else {
+        // Play a natural 0.4s backchannel ("Mm-hmm.", "Yeah...", "True...")
+        // immediately from RAM while the LLM and TTS prepare the full reply.
+        if (run.output is AndroidVoiceOutput &&
+            text.trim().split(RegExp(r'\s+')).length >= 3) {
+          (run.output as AndroidVoiceOutput).playBackchannelFiller();
+        }
+        resolved = await run.whileActive(
+          reasoner.resolve(text, wakeDetected: wakeTurn),
+        );
+        if (!_current(run, generation)) return;
+        _applyReply(resolved);
+        _publish(VoicePhase.preparingReply);
+      }
+      await run.whileActive(run.outputReady);
       if (!_current(run, generation)) return;
-      if (response.intent == LocalIntent.sleep) {
+      final id = ++_utteranceId;
+      await run.output.speak(resolved.text, id: id);
+      if (!_current(run, generation)) return;
+      if (resolved.intent == LocalIntent.sleep ||
+          (!resolved.followUp && !_services.wakeRequired)) {
         await setEnabled(false);
       } else {
-        await _listen(run, generation, wakeOnly: !response.followUp);
+        await _listen(
+          run,
+          generation,
+          wakeOnly: !resolved.followUp && _services.wakeRequired,
+        );
       }
     } catch (error) {
       await _fail(run, generation, _failure(error));
     }
   }
 
-  Future<void> _fail(_VoiceRun run, int generation, VoiceFailure failure) async {
+  void _applyReply(LocalReply response) {
+    _reply = response.text;
+    if (response.destination != null) {
+      final isDifferentDestination =
+          _destination?.toLowerCase() != response.destination!.toLowerCase();
+      _destination = response.destination;
+      _destinationRevision++;
+      if (isDifferentDestination &&
+          response.checklist.isEmpty &&
+          response.purposeSummary == null &&
+          !response.isCasual) {
+        _purposeSummary = null;
+        _isCasual = false;
+        _checklist = const <String>[];
+        _checklistRevision++;
+      }
+    }
+    if (response.purposeSummary != null ||
+        response.checklist.isNotEmpty ||
+        response.isCasual) {
+      _purposeSummary = response.purposeSummary ?? _purposeSummary;
+      _isCasual = response.isCasual;
+      _checklist = response.isCasual
+          ? const <String>[]
+          : List<String>.unmodifiable(response.checklist);
+      _checklistRevision++;
+    }
+  }
+
+  Future<void> _fail(
+    _VoiceRun run,
+    int generation,
+    VoiceFailure failure,
+  ) async {
     if (!_current(run, generation)) return;
     run.cancelled = true;
     _deadline?.cancel();
+    _startupDeadline?.cancel();
+    _resetAudioLevel();
     _publish(VoicePhase.error, failure: failure);
     await run.dispose();
   }
 
-  VoiceFailure _failure(Object error) => error is VoiceException ? error.failure : VoiceFailure.microphone;
+  VoiceFailure _failure(Object error) =>
+      error is VoiceException ? error.failure : VoiceFailure.microphone;
 }
 
 class _VoiceRun {
@@ -280,6 +540,34 @@ class _VoiceRun {
   StreamSubscription<OutputEvent>? outputEvents;
   bool cancelled = false;
   Future<void>? _disposing;
+  final _cancelled = Completer<void>();
+  Future<void>? _preparingOutput;
+  Object? _outputFailure;
+
+  Future<T> whileActive<T>(Future<T> operation) => Future.any<T>([
+    operation,
+    _cancelled.future.then<T>(
+      (_) => throw const VoiceException(VoiceFailure.interrupted),
+    ),
+  ]);
+
+  void prepareOutput() {
+    _preparingOutput ??= () async {
+      try {
+        await output.initialize().timeout(const Duration(seconds: 10));
+      } catch (error) {
+        _outputFailure = error is VoiceException
+            ? error
+            : const VoiceException(VoiceFailure.output);
+      }
+    }();
+  }
+
+  Future<void> get outputReady async {
+    prepareOutput();
+    await _preparingOutput;
+    if (_outputFailure != null) throw _outputFailure!;
+  }
 
   Future<void> stopMicrophone() async {
     final subscription = audio;
@@ -292,12 +580,21 @@ class _VoiceRun {
 
   Future<void> _dispose() async {
     cancelled = true;
+    if (!_cancelled.isCompleted) _cancelled.complete();
     await speechEvents?.cancel();
     await outputEvents?.cancel();
     for (final cleanup in <Future<void> Function()>[
-      stopMicrophone, output.stopSpeaking, speech.dispose, microphone.dispose, output.dispose,
+      stopMicrophone,
+      output.stopSpeaking,
+      speech.dispose,
+      microphone.dispose,
+      output.dispose,
     ]) {
-      try { await cleanup(); } catch (_) { /* Continue releasing other resources. */ }
+      try {
+        await cleanup();
+      } catch (_) {
+        /* Continue releasing other resources. */
+      }
     }
   }
 }

@@ -13,11 +13,46 @@ class JourneyController extends Notifier<JourneyDraft> {
 
   void setDestination(String value) {
     final normalized = value.trim();
+    if (state.destination.toLowerCase() == normalized.toLowerCase() &&
+        normalized.isNotEmpty) {
+      state = state.copyWith(destination: normalized);
+      return;
+    }
     state = JourneyDraft(destination: normalized);
   }
 
   void setPurpose(JourneyPurpose purpose) {
     state = state.copyWith(purpose: purpose);
+  }
+
+  void setCompanionPrep({
+    String? destination,
+    String? purposeSummary,
+    required bool isCasual,
+    required List<String> checklist,
+  }) {
+    final nextPurpose = isCasual
+        ? JourneyPurpose.visit
+        : (checklist.isNotEmpty ? JourneyPurpose.errand : state.purpose);
+    state = state.copyWith(
+      destination:
+          destination != null && destination.trim().isNotEmpty
+          ? destination.trim()
+          : state.destination,
+      purpose: nextPurpose,
+      purposeSummary: purposeSummary?.trim() ?? state.purposeSummary,
+      isCasual: isCasual,
+      checklist: List<String>.unmodifiable(checklist),
+      checkedItems: const <String>{},
+    );
+  }
+
+  void toggleChecklistItem(String item) {
+    final next = Set<String>.from(state.checkedItems);
+    if (!next.remove(item)) {
+      next.add(item);
+    }
+    state = state.copyWith(checkedItems: Set<String>.unmodifiable(next));
   }
 
   void setTravelMode(TravelMode mode) {

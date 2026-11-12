@@ -26,12 +26,14 @@ class RoutePreviewScreen extends ConsumerWidget {
       );
     }
 
-    final purposeText = switch (draft.purpose) {
-      JourneyPurpose.errand => 'An errand to run',
-      JourneyPurpose.visit => 'Someone to see',
-      JourneyPurpose.directionsOnly => 'Somewhere to be',
-      JourneyPurpose.unspecified => 'A fresh adventure',
-    };
+    final purposeText = draft.purposeSummary.isNotEmpty
+        ? draft.purposeSummary
+        : switch (draft.purpose) {
+            JourneyPurpose.errand => 'An errand to run',
+            JourneyPurpose.visit => 'Someone to see',
+            JourneyPurpose.directionsOnly => 'Somewhere to be',
+            JourneyPurpose.unspecified => 'A fresh adventure',
+          };
 
     return NaviPage(
       title: 'Journey overview',
@@ -142,6 +144,83 @@ class RoutePreviewScreen extends ConsumerWidget {
                 ],
               ),
             ),
+            if (draft.checklist.isNotEmpty && !draft.isCasual) ...[
+              const SizedBox(height: 18),
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: scheme.surface,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: scheme.outlineVariant),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.fact_check_outlined,
+                          size: 16,
+                          color: scheme.secondary,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'THINGS TO BRING ALONG',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: scheme.secondary,
+                              fontSize: 8.5,
+                              letterSpacing: 1.1,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    for (final item in draft.checklist)
+                      InkWell(
+                        borderRadius: BorderRadius.circular(10),
+                        onTap: () => ref
+                            .read(journeyDraftProvider.notifier)
+                            .toggleChecklistItem(item),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 6,
+                            horizontal: 2,
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(
+                                draft.checkedItems.contains(item)
+                                    ? Icons.check_circle_rounded
+                                    : Icons.radio_button_unchecked_rounded,
+                                size: 17,
+                                color: draft.checkedItems.contains(item)
+                                    ? scheme.secondary
+                                    : scheme.onSurfaceVariant,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  item,
+                                  style: theme.textTheme.bodyMedium?.copyWith(
+                                    fontSize: 13,
+                                    decoration:
+                                        draft.checkedItems.contains(item)
+                                        ? TextDecoration.lineThrough
+                                        : null,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 26),
             Text(
               'How are you getting there?',

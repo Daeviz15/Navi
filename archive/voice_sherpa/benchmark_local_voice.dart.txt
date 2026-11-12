@@ -1,0 +1,151 @@
+import 'dart:convert';
+import 'dart:ffi';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:navi/features/voice/data/sherpa_processor.dart';
+import 'package:navi/features/voice/domain/local_command_router.dart';
+import 'package:navi/features/voice/domain/voice_types.dart';
+
+Future<Float32List> readWav(String path) async {
+  final wav = await File(path).readAsBytes();
+  final data = ByteData.sublistView(wav);
+  var offset = 12;
+  while (offset + 8 <= wav.length) {
+    final name = String.fromCharCodes(wav.sublist(offset, offset + 4));
+    final size = data.getUint32(offset + 4, Endian.little);
+    if (name == 'fmt ' &&
+        (data.getUint16(offset + 8, Endian.little) != 1 ||
+            data.getUint16(offset + 10, Endian.little) != 1 ||
+            data.getUint32(offset + 12, Endian.little) != 16000 ||
+            data.getUint16(offset + 22, Endian.little) != 16)) {
+      throw StateError('Expected mono PCM16 at 16kHz');
+    }
+    if (name == 'data') {
+      final samples = Float32List(size ~/ 2);
+      for (var i = 0; i < samples.length; i++) {
+        samples[i] = data.getInt16(offset + 8 + i * 2, Endian.little) / 32768;
+      }
+      return samples;
+    }
+    offset += 8 + size + size % 2;
+  }
+  throw StateError('No WAV data');
+}
+
+Future<void> main(List<String> args) async {
+  if (args.isEmpty) {
+    throw ArgumentError(
+      'Provide the native library directory, optionally legacy',
+    );
+  }
+  if (Platform.isWindows) DynamicLibrary.open('${args.first}/onnxruntime.dll');
+  final legacy = args.contains('legacy');
+  var events = <SpeechEvent>[];
+  final startup = Stopwatch()..start();
+  final processor = await SherpaProcessor.create(
+    'assets/voice/en_small',
+    (event) => events.add(event),
+    libraryPath: args.first,
+    commandDirectory: legacy ? null : 'assets/voice/en_commands',
+    staggeredWake: !legacy,
+    wakeThreshold: legacy ? .35 : .25,
+    wakeScore: legacy ? 1.2 : 1.8,
+    keywordsFile: legacy ? 'tools/fixtures/keywords_legacy.txt' : null,
+  );
+  final startupMs = startup.elapsedMilliseconds;
+  final rows = <Map<String, Object?>>[];
+  final clock = Stopwatch()..start();
+  try {
+    for (final name in [
+      'greeting',
+      'hi',
+      'hello',
+      'destination',
+      'lagos',
+      'negative',
+      'negative_names',
+    ]) {
+      final audio = await readWav('build/voice-validation/$name-16k.wav');
+      final negative = name.startsWith('negative');
+      for (final gain in [1.0, .3]) {
+        for (final silence in [0.0, 1.3, 1.4, 2.9]) {
+          events = [];
+          processor.setMode(SpeechMode.wake);
+          final leading = (silence * 16000).round();
+          final length = leading + audio.length + 48000;
+          for (var offset = 0; offset < length; offset += 1600) {
+            final samples = Float32List(1600);
+            for (var i = 0; i < samples.length; i++) {
+              final index = offset + i - leading;
+              if (index >= 0 && index < audio.length) {
+                samples[i] = audio[index] * gain;
+              }
+            }
+            processor.acceptSamples(samples);
+          }
+          final wake = events.any((event) => event is WakeDetected);
+          final finals = events.whereType<UtteranceEnded>().toList();
+          final text = finals.isEmpty ? '' : finals.last.text;
+          final reply = const LocalCommandRouter().route(
+            text,
+            wakeDetected: wake,
+          );
+          final expectedDestination = name == 'destination'
+              ? 'LONDON'
+              : name == 'lagos'
+              ? 'LAGOS'
+              : null;
+          final correct = negative
+              ? !wake
+              : wake &&
+                    finals.isNotEmpty &&
+                    (expectedDestination == null
+                        ? [
+                            LocalIntent.greeting,
+                            LocalIntent.acknowledgment,
+                          ].contains(reply.intent)
+                        : reply.destination?.toUpperCase() ==
+                              expectedDestination);
+          rows.add({
+            'sample': name,
+            'gain': gain,
+            'silence': silence,
+            'wake': wake,
+            'text': text,
+            'destination': reply.destination,
+            'correct': correct,
+          });
+        }
+      }
+    }
+  } finally {
+    processor.dispose();
+  }
+  final positives = rows
+      .where((row) => !(row['sample'] as String).startsWith('negative'))
+      .toList();
+  final negatives = rows
+      .where((row) => (row['sample'] as String).startsWith('negative'))
+      .toList();
+  final result = {
+    'configuration': legacy ? 'legacy' : 'candidate',
+    'startupMs': startupMs,
+    'processingMs': clock.elapsedMilliseconds,
+    'positiveCases': positives.length,
+    'wakeDetections': positives.where((row) => row['wake'] == true).length,
+    'correctPositiveTurns': positives
+        .where((row) => row['correct'] == true)
+        .length,
+    'negativeCases': negatives.length,
+    'falseWakes': negatives.where((row) => row['wake'] == true).length,
+    'cases': rows,
+  };
+  final path =
+      'build/voice-validation/benchmark-${legacy ? 'legacy' : 'candidate'}.json';
+  await File(
+    path,
+  ).writeAsString(const JsonEncoder.withIndent('  ').convert(result));
+  stdout.writeln(jsonEncode({...result}..remove('cases')));
+  stdout.writeln('Detailed results: $path');
+}

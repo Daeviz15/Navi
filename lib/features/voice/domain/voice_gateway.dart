@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'local_command_router.dart';
 import 'voice_types.dart';
 
 abstract interface class MicrophoneInput {
@@ -15,6 +16,13 @@ abstract interface class SpeechEngine {
   void setMode(SpeechMode mode);
   void addAudio(Uint8List bytes);
   Future<void> dispose();
+}
+
+abstract interface class VoiceReasoner {
+  Future<LocalReply> resolve(
+    String utterance, {
+    required bool wakeDetected,
+  });
 }
 
 /// Playback events carry utterance IDs so late native callbacks are harmless.

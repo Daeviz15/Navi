@@ -1,6 +1,15 @@
 enum SpeechMode { wake, listening, muted }
 
-enum VoicePhase { off, preparing, armed, listening, preparingReply, speaking, suspended, error }
+enum VoicePhase {
+  off,
+  preparing,
+  armed,
+  listening,
+  preparingReply,
+  speaking,
+  suspended,
+  error,
+}
 
 enum VoiceFailure {
   permissionDenied,
@@ -11,6 +20,8 @@ enum VoiceFailure {
   processingOverrun,
   offlineVoiceMissing,
   output,
+  startupTimeout,
+  wakeModelMissing,
 }
 
 class VoiceException implements Exception {
@@ -59,6 +70,10 @@ class VoiceSessionState {
     this.failure,
     this.destination,
     this.destinationRevision = 0,
+    this.purposeSummary,
+    this.isCasual = false,
+    this.checklist = const <String>[],
+    this.checklistRevision = 0,
   });
 
   final bool enabled;
@@ -68,22 +83,36 @@ class VoiceSessionState {
   final VoiceFailure? failure;
   final String? destination;
   final int destinationRevision;
+  final String? purposeSummary;
+  final bool isCasual;
+  final List<String> checklist;
+  final int checklistRevision;
 
   String get caption => switch (phase) {
     VoicePhase.off => 'No rush. Ready when you are.',
     VoicePhase.preparing => 'Getting ready to listen on this device…',
     VoicePhase.armed => 'Say “Hey Navi” or “Hi Navi”.',
     VoicePhase.listening => transcript.isEmpty ? 'I’m listening.' : transcript,
-    VoicePhase.preparingReply => 'One moment…',
+    VoicePhase.preparingReply => reply.isEmpty ? 'One moment…' : reply,
     VoicePhase.speaking => reply,
     VoicePhase.suspended => 'Hands-free is paused.',
     VoicePhase.error => switch (failure) {
-      VoiceFailure.permissionDenied => 'Allow microphone access to talk to Navi.',
-      VoiceFailure.offlineVoiceMissing => 'Install an offline English voice in your phone’s speech settings.',
-      VoiceFailure.processingOverrun => 'Audio processing fell behind. Try again in a quieter place.',
-      VoiceFailure.interrupted => 'The microphone was interrupted. Tap to reconnect.',
-      VoiceFailure.model => 'The local speech model could not load. Try restarting the app.',
-      VoiceFailure.unavailable => 'Hands-free is available on Android in this version.',
+      VoiceFailure.wakeModelMissing =>
+        'Navi’s wake model is missing from this build.',
+      VoiceFailure.startupTimeout =>
+        'Getting ready took too long. Tap to retry hands-free.',
+      VoiceFailure.permissionDenied =>
+        'Allow microphone access to talk to Navi.',
+      VoiceFailure.offlineVoiceMissing =>
+        'Install an offline English voice in your phone’s speech settings.',
+      VoiceFailure.processingOverrun =>
+        'Audio processing fell behind. Try again in a quieter place.',
+      VoiceFailure.interrupted =>
+        'The microphone was interrupted. Tap to reconnect.',
+      VoiceFailure.model =>
+        'The local speech model could not load. Try restarting the app.',
+      VoiceFailure.unavailable =>
+        'Hands-free is available on Android in this version.',
       _ => 'Hands-free could not continue. Tap to retry.',
     },
   };
