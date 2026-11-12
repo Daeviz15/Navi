@@ -322,6 +322,11 @@ class NaviLetterWalkPainter extends CustomPainter {
     }
 
     // --- 3. Draw Active Illuminated Strokes ---
+    // If summit reached, boost the glow intensity to create a triumphant bloom
+    final double bloomBoost = progress >= 0.92
+        ? 1.0 + (((progress - 0.92) / 0.08).clamp(0.0, 1.0) * 0.4)
+        : 1.0;
+
     _drawActiveStrokes(
       canvas: canvas,
       scale: scale,
@@ -352,6 +357,7 @@ class NaviLetterWalkPainter extends CustomPainter {
       iCap: iCap,
       iStem: iStem,
       iBase: iBase,
+      bloomBoost: bloomBoost,
     );
 
     // --- 4. Radiant Pulse Wave at Summit ---
@@ -420,19 +426,23 @@ class NaviLetterWalkPainter extends CustomPainter {
     required double iCap,
     required double iStem,
     required double iBase,
+    double bloomBoost = 1.0,
   }) {
     // Outer glow paint
     final glowPaint = Paint()
-      ..color = primaryColor.withValues(alpha: 0.38)
+      ..color = primaryColor.withValues(alpha: (0.38 * bloomBoost).clamp(0.0, 0.75))
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 9.0 * scale
+      ..strokeWidth = (9.0 * scale) * (bloomBoost > 1.0 ? 1.25 : 1.0)
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5);
+      ..maskFilter = MaskFilter.blur(
+        BlurStyle.normal,
+        5 * (bloomBoost > 1.0 ? 1.3 : 1.0),
+      );
 
     // Core crisp neon paint
     final corePaint = Paint()
-      ..color = primaryColor
+      ..color = Color.lerp(primaryColor, accentColor, ((bloomBoost - 1.0) / 0.4).clamp(0.0, 1.0))!
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3.6 * scale
       ..strokeCap = StrokeCap.round
