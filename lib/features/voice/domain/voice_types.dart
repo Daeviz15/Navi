@@ -45,7 +45,8 @@ class TranscriptionStarted extends SpeechEvent {
 }
 
 class ListeningResumed extends SpeechEvent {
-  const ListeningResumed();
+  const ListeningResumed({this.needsRepeat = false});
+  final bool needsRepeat;
 }
 
 class WakeDetected extends SpeechEvent {

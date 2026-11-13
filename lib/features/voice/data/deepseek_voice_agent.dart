@@ -5,6 +5,7 @@ import '../domain/lagos_gazetteer.dart';
 import '../domain/local_command_router.dart';
 import '../domain/trip_prep_knowledge.dart';
 import '../domain/voice_gateway.dart';
+import '../../navigation/domain/navigation_gateway.dart';
 import 'cloud_http_client.dart';
 
 /// Conversational travel & trip-preparation companion powered by Groq
@@ -107,7 +108,7 @@ Respond ONLY with a valid JSON object matching this exact schema:
 Active Transit Rules:
 1. Stay Strictly Anchored to the Active Trip: Keep answers focused ONLY on the active destination, current location, distance/ETA, safety, route steps, travel mode, and saved checklist in the live trip context. Do NOT start planning a new trip or ask "What are we going there to sort out?" on normal transit questions.
 2. Concise & Safety-First: Speak clearly and briefly (max 24 words). Prioritize telling the user where they currently are (from "currentArea"), how far/long is left, and simple reassurance to stay guided safely.
-3. Never Fabricate Telemetry: Use ONLY the currentArea, remainingDistance, remainingEta, routeSteps, destination, and checklist provided in the live trip context. If "currentArea" or route numbers say unavailable, honestly say GPS/route details are still settling. A destination label is not a confirmed address: when destinationStatus is awaiting_address_confirmation, explain that the user must choose an exact address. Never claim it is confirmed or that route guidance has begun. Only the app can confirm a place. Remaining distance is an approximate route-shape estimate, never proof of arrival or the correct bus stop. When routeSteps is empty, do not invent junction or turn instructions. Planning time from a previous origin is not a live remaining ETA.
+3. Never Fabricate Telemetry: Use ONLY the currentArea, remainingDistance, remainingEta, routeSteps, destination, and checklist provided in the live trip context. If "currentArea" or route numbers say unavailable, honestly say GPS/route details are still settling. A destination label is not a confirmed address: when destinationStatus is awaiting_address_confirmation, explain that the user must choose an exact address. Never claim it is confirmed or that route guidance has begun. Only the app can confirm a place. Remaining distance is an approximate route-shape estimate, never proof of arrival or the correct bus stop. When routeSteps is empty, do not invent junction or turn instructions. Planning time from a previous origin is not a live remaining ETA. When routeKind is road_corridor, the geometry is a driving-road preview, not a verified bus route; never present it as bus guidance, a bus ETA, a stop, or evidence that the bus is off route. An unavailable currentArea must not be replaced with an old place from conversation history.
 4. Normal Mentions Never Switch Trips: Unless the user EXPLICITLY asks to cancel/change/switch destination, set "changeTrip": false, "destination": null, "followUp": true. Never treat landmarks or passing places they ask about as a new destination.
 5. Explicit Trip Change ("changeTrip": true): ONLY when the user clearly says they want to change/switch/redirect their trip to a different place:
    - Set "changeTrip": true, "intent": "destination", "destination": "<new canonical Lagos place>".
@@ -248,15 +249,16 @@ Active Transit Rules:
     required bool wakeDetected,
   }) async {
     final revision = ++_requestRevision;
-    final normalizedUtterance = LagosGazetteer.normalizeTranscript(utterance);
-    final trimmedUtterance = normalizedUtterance.trim();
+    // Preserve what ASR actually heard. Phonetic place suggestions are scoped
+    // to extracted destination candidates in _extractFastDestination.
+    final trimmedUtterance = utterance.trim();
     final cleaned = fallback.removeWakePhrase(
       trimmedUtterance,
       wakeDetected: wakeDetected,
     );
     final effectiveUtterance = cleaned.isEmpty ? trimmedUtterance : cleaned;
     final local = fallback.route(
-      normalizedUtterance,
+      utterance,
       wakeDetected: wakeDetected,
     );
 
@@ -560,6 +562,8 @@ Active Transit Rules:
       'travelMode': c.travelModeLabel ?? 'By bus',
       'isOffRoute': c.isOffRoute,
       'isRoadCorridorFallback': c.isRoadFallback,
+      'routeKind': c.routeKind?.wireName ?? 'unavailable',
+      'busRouteVerified': c.routeKind == RouteKind.busTransit,
       'remainingDistance': remainingDistance,
       'remainingEta': remainingEta,
       'routeProgressStatus': c.routeProgressStatus?.name ?? 'unavailable',
@@ -594,11 +598,11 @@ Active Transit Rules:
           'your destination';
       final area = _transitContext.currentArea;
       final hint = area != null
-          ? 'You are around $area heading toward $dest. '
-          : 'You are still guided toward $dest. ';
+          ? 'You are around $area. Your destination is $dest. '
+          : 'Your destination is $dest. ';
       return LocalReply(
         LocalIntent.clarify,
-        '${hint}My voice connection dropped briefly, tap me to try again.',
+        '${hint}${_transitContext.isRoadFallback ? 'Only a road preview is available. ' : ''}My voice connection dropped briefly, tap me to try again.',
         followUp: true,
       );
     }

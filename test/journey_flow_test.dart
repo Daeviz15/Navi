@@ -9,8 +9,11 @@ import 'package:navi/features/journey/presentation/journey_controller.dart';
 import 'package:navi/features/location/application/location_controller.dart';
 import 'package:navi/features/location/domain/location_gateway.dart';
 import 'package:navi/features/navigation/data/maps_configuration.dart';
+import 'package:navi/features/voice/application/voice_dependencies.dart';
 
 import 'support/fake_location_gateway.dart';
+import 'support/voice_harness.dart';
+import 'support/journey_test_frames.dart';
 
 void main() {
   late FakeLocationGateway gateway;
@@ -21,6 +24,7 @@ void main() {
     gateway = FakeLocationGateway();
     container = ProviderContainer(
       overrides: [
+        voiceServicesProvider.overrideWithValue(silentVoiceServices()),
         locationGatewayProvider.overrideWithValue(gateway),
         mapsConfigurationProvider.overrideWith(
           (ref) async => MapsConfiguration.missing,
@@ -74,6 +78,8 @@ void main() {
       expect(find.text('Finding our starting point…'), findsOneWidget);
 
       gateway.pendingAccess!.complete(LocationAccess.precise);
+      await tester.pump();
+      await tester.runAsync(flushVoice);
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('journey-map-preview')), findsOneWidget);
       expect(gateway.watchCalls, 1);
@@ -118,7 +124,7 @@ void main() {
       await start(tester);
       expect(find.text('Travel light.'), findsOneWidget);
       expect(find.text('Your essentials'), findsNothing);
-      await tester.pumpAndSettle();
+      await settleMapEntry(tester);
       expect(find.byKey(const ValueKey('journey-map-preview')), findsOneWidget);
       expect(find.text('Location access is off'), findsOneWidget);
       expect(find.text('What brings you there?'), findsNothing);
@@ -184,7 +190,7 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
       expect(gateway.permissionRequests, isEmpty);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-      await tester.pumpAndSettle();
+      await settleMapEntry(tester);
       expect(find.byKey(const ValueKey('journey-map-preview')), findsOneWidget);
       expect(gateway.permissionRequests, [true]);
       await finish(tester);

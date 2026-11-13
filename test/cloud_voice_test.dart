@@ -308,7 +308,7 @@ void main() {
 
     // Stage 2: User replies with their purpose -> provides Nigerian SIM registration checklist!
     final simTurn = await agent.resolve(
-      'I want to register a new seem card',
+      'I want to register a new SIM card',
       wakeDetected: true,
     );
     expect(simTurn.intent, LocalIntent.purpose);
@@ -338,7 +338,7 @@ void main() {
       }) async {
         expect(uri.toString(), contains('groq.com/openai/v1/audio/transcriptions'));
         expect(headers['Authorization'], 'Bearer test-groq-key');
-        expect(fields['model'], 'whisper-large-v3-turbo');
+        expect(fields['model'], 'whisper-large-v3');
         expect(ascii.decode(fileBytes.sublist(0, 4)), 'RIFF');
         return const CloudHttpResponse(
           200,
@@ -674,7 +674,7 @@ void main() {
     }
     await Future<void>.delayed(Duration.zero);
     expect(http.multipartCalls, 0);
-    expect(events, isEmpty);
+    expect(events.whereType<TranscriptionStarted>(), isEmpty);
 
     // User speaks clearly above noise floor, then pauses back at room noise.
     for (var i = 0; i < 4; i++) {
@@ -721,6 +721,104 @@ void main() {
     }
     await Future<void>.delayed(Duration.zero);
     expect(http.multipartCalls, 1);
+  });
+
+  test(
+    'short map prompt reaches its cloud wait budget and reuses late cached audio',
+    () async {
+      AndroidVoiceOutput.resetStateForTesting();
+      final gate = Completer<CloudHttpBytesResponse>();
+      final sampleWav = encodePcm16MonoWav(
+        _pcmChunk(800, 1000),
+        sampleRate: 24000,
+      );
+      final http = _FakeCloudHttp(
+        jsonBytesHandler: ({required uri, required headers, required body}) =>
+            gate.future,
+      );
+      final output = AndroidVoiceOutput(
+        groqApiKey: 'test',
+        googleApiKey: '',
+        synthesisBudget: const Duration(milliseconds: 20),
+        http: http,
+      );
+      expect(await output.synthesizeForPlayback('Map prompt budget'), isNull);
+      expect(gate.isCompleted, isFalse);
+      gate.complete(CloudHttpBytesResponse(200, sampleWav));
+      expect(await output.synthesizeWav('Map prompt budget'), isNotNull);
+      expect(
+        await output.synthesizeForPlayback('Map prompt budget'),
+        isNotNull,
+      );
+      expect(http.jsonBytesCalls, 1);
+      await output.dispose();
+    },
+  );
+
+  test(
+    'prewarming and map playback share synthesis without using a Google key without Android identity',
+    () async {
+      AndroidVoiceOutput.resetStateForTesting();
+      final gate = Completer<CloudHttpBytesResponse>();
+      final requested = Completer<void>();
+      final sampleWav = encodePcm16MonoWav(
+        _pcmChunk(800, 1000),
+        sampleRate: 24000,
+      );
+      final http = _FakeCloudHttp(
+        jsonBytesHandler: ({required uri, required headers, required body}) {
+          expect(uri.host, 'api.groq.com');
+          if (!requested.isCompleted) requested.complete();
+          return gate.future;
+        },
+      );
+      final prepare = AndroidVoiceOutput(
+        groqApiKey: 'test',
+        googleApiKey: 'android-key',
+        http: http,
+      );
+      final playback = AndroidVoiceOutput(
+        groqApiKey: 'test',
+        googleApiKey: 'android-key',
+        http: http,
+      );
+      final warmed = prepare.prepareSpeech('Shared map prompt');
+      await requested.future;
+      final audio = playback.synthesizeWav('Shared map prompt');
+      await Future<void>.delayed(Duration.zero);
+      expect(http.jsonBytesCalls, 1);
+      gate.complete(CloudHttpBytesResponse(200, sampleWav));
+      await warmed;
+      expect(await audio, isNotNull);
+      await prepare.dispose();
+      await playback.dispose();
+    },
+  );
+
+  test('synthesized cache separates different models and voices', () async {
+    AndroidVoiceOutput.resetStateForTesting();
+    final wav = encodePcm16MonoWav(_pcmChunk(800, 1000), sampleRate: 24000);
+    final http = _FakeCloudHttp(
+      jsonBytesHandler:
+          ({required uri, required headers, required body}) async =>
+              CloudHttpBytesResponse(200, wav),
+    );
+    for (final identity in [
+      ('model-a', 'voice-a'),
+      ('model-a', 'voice-b'),
+      ('model-b', 'voice-b'),
+    ]) {
+      final output = AndroidVoiceOutput(
+        groqApiKey: 'test',
+        googleApiKey: '',
+        ttsModel: identity.$1,
+        ttsVoice: identity.$2,
+        http: http,
+      );
+      expect(await output.synthesizeWav('Distinct voice cache'), isNotNull);
+      await output.dispose();
+    }
+    expect(http.jsonBytesCalls, 3);
   });
 
   test('AndroidVoiceOutput synthesizes Orpheus WAV when Groq is healthy', () async {

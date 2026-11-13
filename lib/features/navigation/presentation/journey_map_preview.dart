@@ -44,7 +44,7 @@ class _JourneyMapPreviewState extends ConsumerState<JourneyMapPreview> {
   final _choices = GlobalKey();
   final _mapSection = GlobalKey();
   JourneyIdentity? _guidedIntent;
-  DestinationSearchToken? _announcedToken;
+  JourneyIdentity? _announcedIntent;
   ConfirmedDestination? _shownConfirmation;
   int _scrollRevision = 0;
   bool _userScrolling = false;
@@ -79,6 +79,29 @@ class _JourneyMapPreviewState extends ConsumerState<JourneyMapPreview> {
       _observedIntent = navigation.identity;
       _userExplored = false;
     }
+    final draft = ref.read(journeyDraftProvider);
+    if (draft.isActive &&
+        navigation.selected == null &&
+        _announcedIntent != draft.identity) {
+      _announcedIntent = draft.identity;
+      if (!voice.enabled) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          Future.microtask(() {
+            if (!mounted ||
+                ModalRoute.of(context)?.isCurrent != true ||
+                ref.read(journeyDraftProvider).identity != draft.identity ||
+                ref.read(navigationControllerProvider).selected != null) {
+              return;
+            }
+            unawaited(
+              ref
+                  .read(voiceSessionProvider.notifier)
+                  .announceMapEntry(draft.identity),
+            );
+          });
+        });
+      }
+    }
     final token = navigation.suggestions?.token;
     if (navigation.phase == NavigationPhase.choosePlace &&
         navigation.places.isNotEmpty &&
@@ -96,29 +119,6 @@ class _JourneyMapPreviewState extends ConsumerState<JourneyMapPreview> {
           }
           if (!_userExplored) _focus(_choices, revision);
         });
-      }
-      if (_announcedToken != token) {
-        _announcedToken = token;
-        if (!voice.enabled) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            // The companion registers surface visibility in its own post-frame
-            // callback. Run after all those callbacks, still outside widget build.
-            Future.microtask(() {
-              if (!mounted ||
-                  ModalRoute.of(context)?.isCurrent != true ||
-                  ref.read(navigationControllerProvider).suggestions?.token !=
-                      token ||
-                  ref.read(navigationControllerProvider).selected != null) {
-                return;
-              }
-              unawaited(
-                ref
-                    .read(voiceSessionProvider.notifier)
-                    .announceDestinationChoices(token),
-              );
-            });
-          });
-        }
       }
     }
     final confirmation = navigation.confirmation;
@@ -601,17 +601,18 @@ class _JourneyMapPreviewState extends ConsumerState<JourneyMapPreview> {
               'Previous route shown. Its planning estimates need refreshing.',
               style: theme.textTheme.bodySmall,
             )
-          else if (!route.isRoadFallback)
+          else if (route.durationSeconds != null)
             Text(
-              'Planning time from last refresh · ${(route.durationSeconds / 60).ceil()} min',
+              'Planning time from last refresh · ${(route.durationSeconds! / 60).ceil()} min',
               style: theme.textTheme.bodySmall,
             ),
           if (state.refreshing) const LinearProgressIndicator(minHeight: 2),
           if (state.message != null)
             Text(state.message!, style: theme.textTheme.bodySmall),
+          Text(route.kind.label, style: theme.textTheme.bodySmall),
           if (route.isRoadFallback)
             Text(
-              'Showing Lagos road corridor (live bus schedule unavailable).',
+              'Road preview only. This is not a verified bus route or bus travel time.',
               style: theme.textTheme.bodySmall?.copyWith(fontSize: 10.5),
             ),
         ],

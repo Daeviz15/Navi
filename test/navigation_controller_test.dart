@@ -493,6 +493,7 @@ JourneyRoute _route(TravelMode mode) => JourneyRoute(
   points: const [GeoPoint(6.52, 3.37), GeoPoint(6.45, 3.47)],
   origin: const GeoPoint(6.52, 3.37),
   mode: mode,
+  kind: mode == TravelMode.bus ? RouteKind.busTransit : RouteKind.walking,
   distanceMeters: 10000,
   durationSeconds: 1800,
   expiresAt: DateTime.now().add(const Duration(minutes: 5)),

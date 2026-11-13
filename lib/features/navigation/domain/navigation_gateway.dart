@@ -14,24 +14,52 @@ class DestinationPlace {
   final GeoPoint point;
 }
 
+enum RouteKind {
+  walking('walking'),
+  busTransit('bus_transit'),
+  roadCorridor('road_corridor');
+
+  const RouteKind(this.wireName);
+  final String wireName;
+  bool supports(TravelMode mode) => mode == TravelMode.walking
+      ? this == walking
+      : this == busTransit || this == roadCorridor;
+  String get label => switch (this) {
+    walking => 'Walking route',
+    busTransit => 'Bus transit route',
+    roadCorridor => 'Road preview · bus route unverified',
+  };
+}
+
+enum RouteSource { googleRoutes }
+
 class JourneyRoute {
   JourneyRoute({
     required List<GeoPoint> points,
     required this.origin,
     required this.mode,
+    required this.kind,
     required this.distanceMeters,
-    required this.durationSeconds,
+    required double? durationSeconds,
     required this.expiresAt,
-    this.isRoadFallback = false,
+    this.source = RouteSource.googleRoutes,
     List<String> stepHints = const <String>[],
-  }) : points = List.unmodifiable(points),
+  }) : durationSeconds = kind == RouteKind.roadCorridor
+           ? null
+           : durationSeconds,
+       points = List.unmodifiable(points),
        stepHints = List.unmodifiable(stepHints);
   final List<GeoPoint> points;
   final GeoPoint origin;
   final TravelMode mode;
-  final double distanceMeters, durationSeconds;
+  final double distanceMeters;
+
+  /// Origin-based planning estimate. A driving preview has no bus estimate.
+  final double? durationSeconds;
+  final RouteKind kind;
+  final RouteSource source;
   final DateTime expiresAt;
-  final bool isRoadFallback;
+  bool get isRoadFallback => kind == RouteKind.roadCorridor;
 
   /// Unpositioned overview hints. Never use these as current turn instructions.
   final List<String> stepHints;

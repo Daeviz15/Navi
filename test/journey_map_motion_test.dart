@@ -12,6 +12,7 @@ import 'package:navi/features/navigation/domain/destination_selection.dart';
 import 'package:navi/features/navigation/domain/navigation_gateway.dart';
 import 'package:navi/features/navigation/domain/route_progress.dart';
 import 'package:navi/features/navigation/presentation/journey_map_canvas.dart';
+import 'package:navi/features/navigation/presentation/route_preview_trace.dart';
 
 void main() {
   late GoogleMapsFlutterPlatform previousPlatform;
@@ -19,7 +20,7 @@ void main() {
   late LocationState location;
   setUp(() {
     previousPlatform = GoogleMapsFlutterPlatform.instance;
-    GoogleMapsFlutterPlatform.instance = _MapPlatform();
+    GoogleMapsFlutterPlatform.instance = _MapPlatform(connect: true);
     location = const LocationState();
     const identity = JourneyIdentity(tripId: 1);
     const place = DestinationPlace(
@@ -47,6 +48,7 @@ void main() {
         ],
         origin: const GeoPoint(6.52, 3.37),
         mode: TravelMode.walking,
+        kind: RouteKind.walking,
         distanceMeters: 2200,
         durationSeconds: 1500,
         expiresAt: DateTime(2026, 11, 13, 12),
@@ -59,40 +61,77 @@ void main() {
     WidgetTester tester, {
     bool reduced = false,
     bool visible = true,
-  }) => tester.pumpWidget(
-    MaterialApp(
-      home: MediaQuery(
-        data: MediaQueryData(disableAnimations: reduced),
-        child: TickerMode(
-          enabled: visible,
-          child: JourneyMapCanvas(location: location, navigation: navigation),
+    double density = 1,
+  }) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MediaQuery(
+          data: MediaQueryData(
+            disableAnimations: reduced,
+            devicePixelRatio: density,
+          ),
+          child: TickerMode(
+            enabled: visible,
+            child: JourneyMapCanvas(location: location, navigation: navigation),
+          ),
         ),
       ),
-    ),
-  );
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pump();
+  }
 
   Set<Polyline> lines(WidgetTester tester) =>
       tester.widget<GoogleMap>(find.byType(GoogleMap)).polylines;
-  Polyline flow(WidgetTester tester) => lines(
-    tester,
-  ).singleWhere((line) => line.polylineId.value == 'route-flow');
+  RoutePreviewTrace trace(WidgetTester tester) =>
+      tester
+              .widget<CustomPaint>(
+                find.byKey(const ValueKey('route-preview-trace')),
+              )
+              .painter!
+          as RoutePreviewTrace;
 
-  testWidgets('real route preview flows without inventing GPS progress', (
-    tester,
-  ) async {
-    await mount(tester);
-    expect(navigation.progress.canReportRemaining, isFalse);
-    expect(
-      lines(tester).map((p) => p.polylineId.value),
-      contains('verified-route'),
-    );
-    final first = flow(tester).points.first;
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(flow(tester).points.first, isNot(first));
-    expect(flow(tester).points, hasLength(13));
-    expect(navigation.progress.remainingMeters, isNull);
-    await tester.pumpWidget(const SizedBox.shrink());
-  });
+  testWidgets(
+    'Flutter trace animates without native map rebuilds or invented progress',
+    (tester) async {
+      await mount(tester);
+      final platform = GoogleMapsFlutterPlatform.instance as _MapPlatform;
+      expect(navigation.progress.canReportRemaining, isFalse);
+      expect(
+        lines(tester).map((p) => p.polylineId.value),
+        contains('verified-route'),
+      );
+      final phase = trace(tester).phase.value;
+      final projections = platform.projections;
+      final builds = platform.builds;
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(trace(tester).phase.value, isNot(phase));
+      expect(platform.projections, projections);
+      expect(platform.builds, builds);
+      expect(navigation.progress.remainingMeters, isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'camera movement hides the trace until freshly projected; Android density is respected',
+    (tester) async {
+      await mount(tester, density: 2);
+      final initial = trace(tester).path.getBounds();
+      expect(initial.right, closeTo(55, 1));
+      final map = tester.widget<GoogleMap>(find.byType(GoogleMap));
+      map.onCameraMoveStarted!();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('route-preview-trace')), findsNothing);
+      map.onCameraIdle!();
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pump();
+      expect(trace(tester).path.getBounds(), initial);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   testWidgets(
     'route overview keeps the blue cloud in view across GPS updates',
@@ -178,11 +217,13 @@ void main() {
     'reduced motion and hidden surfaces retain only the static route',
     (tester) async {
       await mount(tester, reduced: true);
-      expect(lines(tester), hasLength(1));
-      await mount(tester);
       expect(lines(tester), hasLength(2));
+      expect(find.byKey(const ValueKey('route-preview-trace')), findsNothing);
+      await mount(tester);
+      expect(find.byKey(const ValueKey('route-preview-trace')), findsOneWidget);
       await mount(tester, visible: false);
-      expect(lines(tester), hasLength(1));
+      expect(lines(tester), hasLength(2));
+      expect(find.byKey(const ValueKey('route-preview-trace')), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
@@ -193,19 +234,23 @@ void main() {
       await mount(tester);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
       await tester.pump();
-      expect(lines(tester), hasLength(1));
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-      await tester.pump();
       expect(lines(tester), hasLength(2));
+      expect(find.byKey(const ValueKey('route-preview-trace')), findsNothing);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('route-preview-trace')), findsOneWidget);
       navigation = navigation.copyWith(estimatesStale: true);
       await mount(tester);
-      expect(lines(tester), hasLength(1));
+      expect(lines(tester), hasLength(2));
+      expect(find.byKey(const ValueKey('route-preview-trace')), findsNothing);
       navigation = navigation.copyWith(
         estimatesStale: false,
         progress: const RouteProgress(status: RouteProgressStatus.offRoute),
       );
       await mount(tester);
-      expect(lines(tester), hasLength(1));
+      expect(lines(tester), hasLength(2));
+      expect(find.byKey(const ValueKey('route-preview-trace')), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
@@ -217,8 +262,21 @@ class _MapPlatform extends MethodChannelGoogleMapsFlutter {
   _MapPlatform({this.connect = false});
   final bool connect;
   final _created = <int>{};
+  int projections = 0, builds = 0;
   final cameraUpdates = <CameraUpdate>[];
   final animatedCameraUpdates = <CameraUpdate>[];
+
+  @override
+  Future<ScreenCoordinate> getScreenCoordinate(
+    LatLng point, {
+    required int mapId,
+  }) async {
+    projections++;
+    return ScreenCoordinate(
+      x: (10 + (point.longitude - 3.37) * 10000).round(),
+      y: (10 + (point.latitude - 6.52) * 10000).round(),
+    );
+  }
 
   @override
   Future<void> init(int mapId) async {
@@ -252,6 +310,7 @@ class _MapPlatform extends MethodChannelGoogleMapsFlutter {
     MapConfiguration mapConfiguration = const MapConfiguration(),
     MapObjects mapObjects = const MapObjects(),
   }) {
+    builds++;
     if (connect && _created.add(creationId)) {
       WidgetsBinding.instance.addPostFrameCallback(
         (_) => onPlatformViewCreated(creationId),

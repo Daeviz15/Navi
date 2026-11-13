@@ -8,6 +8,7 @@ import '../data/groq_speech_engine.dart';
 import '../data/record_microphone.dart';
 import '../domain/local_command_router.dart';
 import '../domain/voice_gateway.dart';
+import '../domain/journey_voice_prompts.dart';
 
 class VoiceServices {
   const VoiceServices({
@@ -17,6 +18,8 @@ class VoiceServices {
     this.reasoner = const LocalCommandRouter(),
     this.startupTimeout = const Duration(seconds: 10),
     this.destinations,
+    this.guidanceOutput,
+    this.prepareGuidance,
   });
 
   final MicrophoneInput Function() microphone;
@@ -25,6 +28,8 @@ class VoiceServices {
   final VoiceReasoner reasoner;
   final Duration startupTimeout;
   final DestinationSelectionCommands? destinations;
+  final VoiceGateway Function()? guidanceOutput;
+  final Future<void> Function()? prepareGuidance;
 }
 
 final voiceServicesProvider = Provider<VoiceServices>((ref) {
@@ -32,6 +37,7 @@ final voiceServicesProvider = Provider<VoiceServices>((ref) {
   // Orpheus TTS so TLS 1.3 sockets to api.groq.com stay warm across turns.
   final sharedHttp = DartIoCloudHttpTransport();
   final agent = DeepSeekVoiceAgent(http: sharedHttp, useLocalFastPath: true);
+  Future<void>? preparingGuidance;
   ref.onDispose(() {
     agent.dispose();
     sharedHttp.close();
@@ -41,6 +47,19 @@ final voiceServicesProvider = Provider<VoiceServices>((ref) {
     microphone: RecordMicrophone.new,
     speech: () => GroqSpeechEngine(http: sharedHttp),
     output: () => AndroidVoiceOutput(http: sharedHttp),
+    guidanceOutput: () => AndroidVoiceOutput(
+      http: sharedHttp,
+      synthesisBudget: const Duration(milliseconds: 900),
+    ),
+    prepareGuidance: () => preparingGuidance ??= () async {
+      // Synthesis only: no channel handler, microphone, or playback is opened.
+      final output = AndroidVoiceOutput(http: sharedHttp);
+      try {
+        await output.prepareSpeech(JourneyVoicePrompts.mapEntry);
+      } finally {
+        await output.dispose();
+      }
+    }(),
     reasoner: agent,
     destinations: RiverpodDestinationSelectionCommands(ref),
   );

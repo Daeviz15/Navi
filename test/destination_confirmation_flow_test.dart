@@ -19,6 +19,7 @@ import 'package:navi/features/navigation/domain/navigation_gateway.dart';
 import 'package:navi/features/voice/application/voice_dependencies.dart';
 import 'package:navi/features/voice/application/voice_session_controller.dart';
 import 'package:navi/features/voice/domain/voice_types.dart';
+import 'package:navi/features/voice/domain/journey_voice_prompts.dart';
 
 import 'support/voice_harness.dart';
 
@@ -368,6 +369,7 @@ class _Gateway implements NavigationGateway {
       points: [origin, destination.point],
       origin: origin,
       mode: mode,
+      kind: mode == TravelMode.bus ? RouteKind.busTransit : RouteKind.walking,
       distanceMeters: 2000,
       durationSeconds: 500,
       expiresAt: DateTime.now().add(const Duration(minutes: 5)),
@@ -382,7 +384,7 @@ class _GuidedVoiceOutput extends TestVoiceOutput {
   @override
   Future<void> speak(String message, {required int id}) {
     final done = super.speak(message, id: id);
-    if (message.startsWith('Let’s confirm the exact destination.')) {
+    if (message == JourneyVoicePrompts.mapEntry) {
       started();
       if (!hold) finish();
     }

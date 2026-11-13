@@ -13,6 +13,7 @@ import '../domain/destination_confirmation_policy.dart';
 import '../domain/voice_gateway.dart';
 import '../domain/voice_types.dart';
 import '../domain/trip_conversation_progress.dart';
+import '../domain/journey_voice_prompts.dart';
 import 'voice_dependencies.dart';
 
 final voiceSessionProvider =
@@ -39,7 +40,7 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
   _VoiceRun? _run;
   _GuidanceOutput? _guidance;
   DestinationSearchToken? _guidanceToken;
-  JourneyIdentity? _lastGuidedIntent;
+  (int, String)? _lastGuidedDestination;
   bool _showingGuidance = false;
   Future<void> _operations = Future.value();
   Timer? _deadline;
@@ -147,7 +148,6 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
         (!context.isActive ||
             identityChanged ||
             context.confirmedPlaceName != null ||
-            context.destinationSuggestions?.places.isNotEmpty != true ||
             (_guidanceToken != null &&
                 _guidanceToken != context.destinationSuggestions?.token))) {
       _showingGuidance = false;
@@ -249,29 +249,47 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
   /// constructs a microphone or recognizer, requests permission, or starts a
   /// follow-up. A tap cancels it before starting the normal conversation path.
   Future<void> announceDestinationChoices(DestinationSearchToken token) {
+    if (token != _transitContext.destinationSuggestions?.token ||
+        _transitContext.destinationSuggestions!.places.isEmpty) {
+      return Future.value();
+    }
+    return announceMapEntry(token.journey, suggestionsToken: token);
+  }
+
+  /// Starts on map entry, independently of destination search latency.
+  Future<void> announceMapEntry(
+    JourneyIdentity identity, {
+    DestinationSearchToken? suggestionsToken,
+  }) {
     if (_disposed ||
         _enabled ||
         !_transitContext.isActive ||
         !_foreground ||
         !_visibleSurfaces.contains('journey') ||
-        token != _transitContext.destinationSuggestions?.token ||
-        token.journey != _transitContext.identity ||
+        identity != _transitContext.identity ||
         _transitContext.confirmedPlaceName != null ||
-        _transitContext.destinationSuggestions!.places.isEmpty ||
-        _lastGuidedIntent == token.journey) {
+        _lastGuidedDestination ==
+            (
+              identity.tripId,
+              _transitContext.destination?.trim().toLowerCase() ?? '',
+            )) {
       return Future.value();
     }
-    _lastGuidedIntent = token.journey;
+    _lastGuidedDestination = (
+      identity.tripId,
+      _transitContext.destination?.trim().toLowerCase() ?? '',
+    );
     _invalidate();
-    _guidanceToken = token;
+    _guidanceToken = suggestionsToken;
     _showingGuidance = true;
     final generation = _generation;
     bool current() =>
-        !_disposed && generation == _generation && _guidanceToken == token;
+        !_disposed &&
+        generation == _generation &&
+        identity == _transitContext.identity &&
+        _showingGuidance;
     _rawTranscript = '';
-    _reply =
-        'Let’s confirm the exact destination. Choose an address below, '
-        'or tap me beside the choices and say an option number.';
+    _reply = JourneyVoicePrompts.mapEntry;
     _publish(VoicePhase.preparingReply);
     _operations = _operations
         .then((_) async {
@@ -280,7 +298,9 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
           await previous?.dispose();
           await _guidance?.dispose();
           if (!current()) return;
-          final guidance = _GuidanceOutput(_services.output());
+          final guidance = _GuidanceOutput(
+            (_services.guidanceOutput ?? _services.output)(),
+          );
           _guidance = guidance;
           final id = ++_utteranceId;
           guidance.events = guidance.output.events.listen((event) {
@@ -294,7 +314,7 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
           });
           try {
             await guidance.whileActive(
-              guidance.output.initialize().timeout(const Duration(seconds: 10)),
+              guidance.output.initialize().timeout(const Duration(seconds: 3)),
             );
             if (!current()) return;
             await guidance.whileActive(
@@ -557,9 +577,12 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
         _deadline = Timer(const Duration(seconds: 12), () {
           unawaited(_fail(run, generation, VoiceFailure.unavailable));
         });
-      case ListeningResumed():
+      case ListeningResumed(:final needsRepeat):
         if (state.phase != VoicePhase.transcribing) return;
         _deadline?.cancel();
+        _rawTranscript = needsRepeat
+            ? 'I couldn’t hear that clearly. Please say it again.'
+            : '';
         _publish(VoicePhase.listening);
       case WakeDetected():
         // Legacy engines cannot activate or control a tap-only conversation.

@@ -9,8 +9,11 @@ import 'package:navi/features/character/presentation/companion_controller.dart';
 import 'package:navi/features/journey/presentation/journey_controller.dart';
 import 'package:navi/features/navigation/data/maps_configuration.dart';
 import 'package:navi/features/location/application/location_controller.dart';
+import 'package:navi/features/voice/application/voice_dependencies.dart';
 
 import 'support/fake_location_gateway.dart';
+import 'support/voice_harness.dart';
+import 'support/journey_test_frames.dart';
 
 void main() {
   setUp(() {
@@ -28,6 +31,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            voiceServicesProvider.overrideWithValue(silentVoiceServices()),
             locationGatewayProvider.overrideWithValue(FakeLocationGateway()),
             mapsConfigurationProvider.overrideWith(
               (ref) async => MapsConfiguration.missing,
@@ -42,7 +46,7 @@ void main() {
 
       await tester.enterText(find.byType(TextFormField), 'MTN office, Ikeja');
       await tester.testTextInput.receiveAction(TextInputAction.go);
-      await tester.pumpAndSettle();
+      await settleMapEntry(tester);
 
       expect(find.text('What brings you there?'), findsNothing);
       expect(find.byKey(const ValueKey('journey-map-preview')), findsOneWidget);
@@ -91,6 +95,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          voiceServicesProvider.overrideWithValue(silentVoiceServices()),
           locationGatewayProvider.overrideWithValue(FakeLocationGateway()),
           mapsConfigurationProvider.overrideWith(
             (ref) async => MapsConfiguration.missing,
@@ -109,7 +114,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextFormField), 'Ikeja');
     await tester.testTextInput.receiveAction(TextInputAction.go);
-    await tester.pumpAndSettle();
+    await settleMapEntry(tester);
     expect(find.byKey(const ValueKey('journey-map-preview')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

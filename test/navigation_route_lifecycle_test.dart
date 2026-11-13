@@ -319,6 +319,9 @@ class _Harness {
         points: points ?? [call.origin, place.point],
         origin: call.origin,
         mode: call.mode,
+        kind: call.mode == TravelMode.bus
+            ? RouteKind.busTransit
+            : RouteKind.walking,
         distanceMeters: call.origin.distanceTo(place.point),
         durationSeconds: 500,
         expiresAt: clock.utcNow.add(ttl),

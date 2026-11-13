@@ -15,6 +15,29 @@ Future<void> flushVoice() async {
   }
 }
 
+/// Layout/lifecycle tests do not use device speech or API credentials. Voice
+/// interaction tests use the controlled, manually completed outputs below.
+VoiceServices silentVoiceServices() => VoiceServices(
+  microphone: () => TestMicrophone(false, null, null),
+  speech: () => TestSpeech(null),
+  output: _SilentOutput.new,
+  guidanceOutput: _SilentOutput.new,
+  prepareGuidance: () async {},
+);
+
+class _SilentOutput implements VoiceGateway {
+  @override
+  Stream<OutputEvent> get events => const Stream.empty();
+  @override
+  Future<void> initialize() async {}
+  @override
+  Future<void> speak(String message, {required int id}) async {}
+  @override
+  Future<void> stopSpeaking() async {}
+  @override
+  Future<void> dispose() async {}
+}
+
 class VoiceHarness {
   VoiceHarness({
     VoiceReasoner reasoner = const LocalCommandRouter(),

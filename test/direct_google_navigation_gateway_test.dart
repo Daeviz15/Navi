@@ -131,7 +131,9 @@ void main() {
         expect(http.postedBodies.last['travelMode'], 'DRIVE');
         expect(route.mode, TravelMode.bus);
         expect(route.isRoadFallback, isTrue);
-        expect(route.stepHints, ['Head north toward Admiralty Way']);
+        expect(route.kind, RouteKind.roadCorridor);
+        expect(route.durationSeconds, isNull);
+        expect(route.stepHints, isEmpty);
       },
     );
 
@@ -306,6 +308,7 @@ void main() {
           ],
           origin: const GeoPoint(6.4400, 3.4600),
           mode: TravelMode.bus,
+          kind: RouteKind.busTransit,
           distanceMeters: 2210,
           durationSeconds: 600,
           expiresAt: DateTime.now().add(const Duration(minutes: 5)),

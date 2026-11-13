@@ -12,6 +12,19 @@ import 'package:navi/features/voice/domain/voice_types.dart';
 import 'support/voice_harness.dart';
 
 void main() {
+  test('uncertain speech keeps the tapped session open and displays a repeat prompt', () async {
+    final h = VoiceHarness();
+    addTearDown(h.container.dispose);
+    await h.start();
+    h.speech.emit(const TranscriptionStarted());
+    await flushVoice();
+    h.speech.emit(const ListeningResumed(needsRepeat: true));
+    await flushVoice();
+    expect(h.state.phase, VoicePhase.listening);
+    expect(h.state.caption, contains('Please say it again'));
+    expect(h.state.enabled, isTrue);
+    expect(h.microphone.running, isTrue);
+  });
   test(
     'an external trip edit cancels an old reply and cannot apply its destination',
     () async {

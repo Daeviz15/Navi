@@ -111,6 +111,8 @@ test('walking requests use WALK and return provider geometry without invented da
   assert.equal(request.travelMode, 'WALK');
   assert.equal(route.distanceMeters, 2000);
   assert.equal(route.durationSeconds, 600);
+  assert.equal(route.kind, 'walking');
+  assert.equal(route.source, 'google_routes');
   assert.equal(route.encodedPolyline, '_p~iF~ps|U_ulLnnqC_mqNvxq`@');
 });
 
@@ -133,7 +135,10 @@ test('bus mode rejects rail-only and walking-only provider results', async () =>
   }
   const queue = fetchQueue([place, routeResponse('BUS')]);
   const service = new GoogleNavigationService('fixture', queue.fetcher);
-  assert.equal((await service.route({ origin: { latitude: 6.5, longitude: 3.3 }, placeId: 'lagos_place', mode: 'bus' })).mode, 'bus');
+  const route = await service.route({ origin: { latitude: 6.5, longitude: 3.3 }, placeId: 'lagos_place', mode: 'bus' });
+  assert.equal(route.mode, 'bus');
+  assert.equal(route.kind, 'bus_transit');
+  assert.equal(route.source, 'google_routes');
 });
 
 test('invalid JSON, timeout and rate limits become bounded provider failures', async () => {

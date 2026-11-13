@@ -11,6 +11,72 @@ import 'package:navi/features/voice/data/cloud_http_client.dart';
 
 void main() {
   test(
+    'route provenance is required, and driving previews cannot carry a bus ETA',
+    () async {
+      final http = _Http();
+      final gateway = BackendNavigationGateway(
+        base: Uri.parse('https://navi.example'),
+        http: http,
+      );
+      const place = DestinationPlace(
+        id: 'abc',
+        name: 'Lekki',
+        address: 'Lagos',
+        point: GeoPoint(6.45, 3.47),
+      );
+      final valid = <String, Object?>{
+        'encodedPolyline': '_p~iF~ps|U_ulLnnqC',
+        'mode': 'bus',
+        'distanceMeters': 1000,
+        'durationSeconds': null,
+        'kind': 'road_corridor',
+        'source': 'google_routes',
+        'expiresAt': DateTime.now()
+            .add(const Duration(minutes: 5))
+            .toIso8601String(),
+      };
+      for (final invalid in [
+        {...valid, 'kind': null},
+        {...valid, 'kind': 'walking'},
+        {...valid, 'source': null},
+        {...valid, 'source': 'unknown'},
+        {...valid, 'kind': 'bus_transit'},
+        {...valid, 'durationSeconds': 300},
+      ]) {
+        http.responses.add(CloudHttpResponse(200, jsonEncode(invalid)));
+        await expectLater(
+          gateway.plan(
+            origin: const GeoPoint(6.52, 3.37),
+            destination: place,
+            mode: TravelMode.bus,
+          ),
+          throwsA(isA<NavigationFailure>()),
+        );
+      }
+      http.responses.add(CloudHttpResponse(200, jsonEncode(valid)));
+      final route = await gateway.plan(
+        origin: const GeoPoint(6.52, 3.37),
+        destination: place,
+        mode: TravelMode.bus,
+      );
+      expect(route.kind, RouteKind.roadCorridor);
+      expect(route.durationSeconds, isNull);
+      http.responses.add(
+        CloudHttpResponse(
+          200,
+          jsonEncode({...valid, 'kind': 'bus_transit', 'durationSeconds': 300}),
+        ),
+      );
+      final bus = await gateway.plan(
+        origin: const GeoPoint(6.52, 3.37),
+        destination: place,
+        mode: TravelMode.bus,
+      );
+      expect(bus.kind, RouteKind.busTransit);
+      expect(bus.durationSeconds, 300);
+    },
+  );
+  test(
     'loopback search sends no embedded provider key and preserves API path prefix',
     () async {
       final http = _Http()
@@ -116,6 +182,8 @@ void main() {
               'mode': mode,
               'distanceMeters': 1000,
               'durationSeconds': 300,
+              'kind': 'walking',
+              'source': 'google_routes',
               'expiresAt':
                   (mode == 'bus'
                           ? DateTime.now().add(const Duration(minutes: 5))

@@ -451,8 +451,12 @@ class NavigationController extends Notifier<NavigationState>
           route.mode != mode ||
           !route.distanceMeters.isFinite ||
           route.distanceMeters <= 0 ||
-          !route.durationSeconds.isFinite ||
-          route.durationSeconds < 0 ||
+          !route.kind.supports(mode) ||
+          (route.kind != RouteKind.roadCorridor &&
+              route.durationSeconds == null) ||
+          (route.durationSeconds != null &&
+              (!route.durationSeconds!.isFinite ||
+                  route.durationSeconds! < 0)) ||
           route.origin.distanceTo(origin) > 1) {
         throw const NavigationFailure('invalid_response');
       }

@@ -38,7 +38,7 @@ class ActiveTripCoordinator {
     // can still be started immediately without waiting for platform teardown.
     if (draft.destination.trim().isEmpty) return _ending ?? Future.value();
     final navigation = _ref.read(navigationControllerProvider.notifier);
-    final currentArea = _ref.read(currentAreaProvider.notifier);
+    final currentArea = _ref.read(currentAreaObservationProvider.notifier);
     final journey = _ref.read(journeyDraftProvider.notifier);
     final location = _ref.read(locationControllerProvider.notifier);
     final voice = _ref.read(voiceSessionProvider.notifier);

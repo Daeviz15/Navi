@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../../core/widgets/navi_page.dart';
 import '../../location/application/location_controller.dart';
+import '../../voice/application/voice_dependencies.dart';
 import '../application/active_trip_coordinator.dart';
 import 'journey_controller.dart';
 
@@ -52,6 +53,8 @@ class _JourneyInitializationScreenState
     super.didChangeDependencies();
     if (_begun) return;
     _begun = true;
+    final prepare = ref.read(voiceServicesProvider).prepareGuidance;
+    if (prepare != null) unawaited(prepare().catchError((Object _) {}));
     final reduced = MediaQuery.disableAnimationsOf(context);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || ref.read(journeyDraftProvider).destination.isEmpty) {

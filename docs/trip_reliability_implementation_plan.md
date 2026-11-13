@@ -177,8 +177,8 @@ Physical-phone check for this slice (pending):
   gates still govern approximate progress and voice facts. Stale paths, confirmed
   deviation, hidden surfaces and backgrounding pause the highlight.
 - Reduced-motion settings use immediate section/camera positioning and a static
-  route. The moving highlight updates a bounded 13-point overlay at 20 Hz; native
-  rendering smoothness and device cost still require a physical-phone check.
+  route. The initial 20 Hz native highlight is superseded by the Flutter drawing
+  refinement below; device smoothness and cost still require a phone check.
 - Riverpod remains the owner of trip, navigation and voice state. Widget-local
   scroll controllers, section keys and one-time presentation effects introduce no
   second destination or route store. The Maps platform-interface dependency is
@@ -207,6 +207,60 @@ Physical-phone check for this refinement (pending):
    and background the app. Check for unwanted scrolling, late speech or capture.
 5. Test reduced motion, weak GPS and route expiry. Route-preview movement must
    never be described as measured traveller progress or proof of arrival.
+
+2026-11-13: map presentation and entry-prompt latency refinement.
+
+- Entry speech no longer waits for place search. It starts against the active
+  journey identity, survives matches arriving, and runs once per destination in
+  a trip. Switching bus/walking cancels obsolete output without replaying it.
+  Tapped conversations still take priority. The microphone never opens for it.
+- Initialization prepares the exact short neural prompt without attaching a
+  native output handler or opening capture. Primary synthesis is shared with
+  playback, avoiding duplicate requests. Prewarming does not call Google TTS
+  without the Android application/certificate headers it may require.
+- Map prompts allow at most 900 ms of cloud synthesis waiting after native output
+  initialization. Cached/ready neural audio is preferred; installed local English
+  speech is preferred for the fallback. Ordinary conversational voice selection
+  retains its existing behavior. This is not a measured 900 ms end-to-end audio
+  guarantee: native engine startup and device voice availability still matter.
+- Late synthesis can populate the bounded audio cache, but cannot trigger a
+  second playback. Playback generations reject cancelled work. Primary cache
+  identities now include model and voice, rather than sharing by message alone.
+- The native road line stays static, with a dark casing and solid gold stroke.
+  Gold/blue trailing highlights and directional arrowheads repaint in Flutter
+  using a display-synchronized 2.8-second animation. Frames do not rebuild the
+  GoogleMap widget or send updated native polylines/projection requests.
+- Optional screen projection runs after camera settling in batches of eight,
+  capped at 160 decorative points. Large input preprocessing is also bounded;
+  provider geometry used for native roads and matching stays intact. Android
+  screen pixels are converted to Flutter logical coordinates. Camera movement
+  invalidates the trace, hides it while moving, and projects again after settling.
+  Failed projections retain the native line and do not retry on every GPS update.
+- Reduced motion, hidden surfaces, backgrounding, stale routes and confirmed
+  deviation stop the effect. Custom painting excludes the attribution strip.
+  This remains route-direction decoration, not measured movement or arrival.
+- Embedded dark styling uses charcoal surfaces, muted street labels, warm road
+  colours, blue water, quieter POIs and transit context. Map controls and the map
+  badge use NAVI typography and solid colours. Google attribution remains native.
+
+Verification: **208 Flutter tests passed** and `flutter analyze --no-pub` reported
+no issues. Diff whitespace checks passed. The Android debug build compiles the
+local-voice fallback alongside the Flutter map effects. Layout/lifecycle fixtures
+explicitly replace speech services and advance the introduction/router in frames;
+they do not use actual device speech or API credentials.
+
+Automated checks cover early speech during search, cancellation, synthesis budget,
+shared preparation/cache identity, geometry bounds, screen density, camera changes,
+and animation frames without native map rebuilds. The Android debug APK compiles.
+No new phone timing, camera alignment capture, frame profile or battery measurement
+has been recorded for this refinement. General conversation TTS deadlines remain
+part of package 5; this change bounds only the map's short orientation prompt.
+
+Phone follow-up: fully restart the new Android build, start a new trip, check the
+first spoken instruction before search completes, then confirm an address. Verify
+gold/blue movement follows the road after fitting, pauses during pan/zoom and
+resumes in alignment. Check local-voice fallback with slow/offline connectivity,
+reduced motion and background return. Record actual first-audio/frame timings.
 
 Next implementation package remains typed route provenance and current-area freshness.
 Bus-versus-road-corridor contracts, stale area labels and shared speech deadlines

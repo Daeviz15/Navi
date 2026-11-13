@@ -9,7 +9,6 @@ class NaviPage extends StatelessWidget {
     this.step,
     this.onBack,
   });
-
   final Widget child;
   final String? title;
   final String? step;

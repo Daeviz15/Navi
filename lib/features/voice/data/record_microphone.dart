@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 import 'dart:developer' as developer;
 
@@ -9,6 +10,7 @@ import 'pcm_audio_levels.dart';
 
 class RecordMicrophone implements MicrophoneInput {
   AudioRecorder? _recorder;
+  StreamIterator<Uint8List>? _capture;
   bool _running = false;
   bool _disposed = false;
   Future<void> _operations = Future.value();
@@ -50,8 +52,11 @@ class RecordMicrophone implements MicrophoneInput {
         sampleRate: 16000,
         numChannels: 1,
         streamBufferSize: 3200,
-        autoGain: false,
-        echoCancel: true,
+        // Request hardware gain and noise suppression where supported. Capture
+        // and playback are exclusive, so echo cancellation is unnecessary and
+        // can suppress quiet speech on some Android devices.
+        autoGain: true,
+        echoCancel: false,
         noiseSuppress: true,
         androidConfig: AndroidRecordConfig(
           audioSource: AndroidAudioSource.voiceRecognition,
@@ -60,11 +65,34 @@ class RecordMicrophone implements MicrophoneInput {
       ),
     );
     _running = true;
+    final capture = StreamIterator(stream);
+    _capture = capture;
+    Uint8List first;
+    try {
+      // Publish “listening” only once the native microphone delivers PCM.
+      // Preserve this first buffer, including words spoken during startup.
+      do {
+        if (!await capture.moveNext().timeout(const Duration(seconds: 3))) {
+          throw const VoiceException(VoiceFailure.microphone);
+        }
+        first = capture.current;
+      } while (first.isEmpty);
+    } catch (_) {
+      await _stop();
+      rethrow;
+    }
     var firstBuffer = true;
     final meter = const bool.fromEnvironment('NAVI_VOICE_DIAGNOSTICS')
         ? PcmAudioMeter()
         : null;
-    return stream.map((bytes) {
+    Stream<Uint8List> frames() async* {
+      yield first;
+      while (await capture.moveNext()) {
+        yield capture.current;
+      }
+    }
+
+    return frames().map((bytes) {
       if (_formatInvalid) throw const VoiceException(VoiceFailure.microphone);
       if (firstBuffer && bytes.isNotEmpty) {
         firstBuffer = false;
@@ -97,6 +125,8 @@ class RecordMicrophone implements MicrophoneInput {
     final recorder = _recorder;
     if (recorder == null || !_running) return;
     _running = false;
+    await _capture?.cancel();
+    _capture = null;
     try {
       // Release capture for playback, but reuse the native recorder for the
       // next turn instead of recreating its platform channels every time.

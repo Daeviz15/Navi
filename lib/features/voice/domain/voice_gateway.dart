@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import '../../journey/domain/journey_identity.dart';
 import '../../navigation/domain/destination_selection.dart';
 import '../../navigation/domain/route_progress.dart';
+import '../../navigation/domain/navigation_gateway.dart';
 import 'local_command_router.dart';
 import 'voice_types.dart';
 
@@ -54,7 +55,7 @@ class JourneyTransitContext {
     this.remainingDurationSeconds,
     this.gpsQualityLabel,
     this.isOffRoute = false,
-    this.isRoadFallback = false,
+    this.routeKind,
     this.nextGuidanceSteps = const <String>[],
     this.routeProgressStatus,
     this.routeEstimatesStale = false,
@@ -77,7 +78,8 @@ class JourneyTransitContext {
   final int? remainingDurationSeconds;
   final String? gpsQualityLabel;
   final bool isOffRoute;
-  final bool isRoadFallback;
+  final RouteKind? routeKind;
+  bool get isRoadFallback => routeKind == RouteKind.roadCorridor;
   final List<String> nextGuidanceSteps;
   final RouteProgressStatus? routeProgressStatus;
   final bool routeEstimatesStale, routeRefreshing;

@@ -191,6 +191,7 @@ void main() {
         points: points,
         origin: points.first,
         mode: TravelMode.bus,
+        kind: RouteKind.busTransit,
         distanceMeters: 1000,
         durationSeconds: 300,
         expiresAt: DateTime.now(),

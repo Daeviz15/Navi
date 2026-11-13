@@ -35,6 +35,8 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
     private var generation = 0
     private var ready = false
     private var activeId: String? = null
+    private var preferredVoice: android.speech.tts.Voice? = null
+    private var offlineVoice: android.speech.tts.Voice? = null
     private var focus: AudioFocusRequest? = null
     private val attributes = AudioAttributes.Builder()
         .setUsage(if (Build.VERSION.SDK_INT >= 26) AudioAttributes.USAGE_ASSISTANT
@@ -75,8 +77,13 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
                 } else {
                     releasePlayer()
                     activeId = id
+                    val local = call.argument<Boolean>("preferOffline") == true
+                    val selectedVoice = if (local) offlineVoice ?: preferredVoice else preferredVoice
+                    selectedVoice?.let { engine!!.setVoice(it) }
                     val params = Bundle().apply {
-                        putString(TextToSpeech.Engine.KEY_FEATURE_NETWORK_SYNTHESIS, "true")
+                        if (!local || offlineVoice == null) {
+                            putString(TextToSpeech.Engine.KEY_FEATURE_NETWORK_SYNTHESIS, "true")
+                        }
                     }
                     val accepted = engine!!.speak(text, TextToSpeech.QUEUE_FLUSH, params, id)
                     if (accepted == TextToSpeech.ERROR) {
@@ -250,6 +257,12 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
             if (voice != null) {
                 tts.setVoice(voice)
             }
+            preferredVoice = voice
+            offlineVoice = voices.filter {
+                !it.isNetworkConnectionRequired &&
+                    !it.features.orEmpty().contains(TextToSpeech.Engine.KEY_FEATURE_NETWORK_SYNTHESIS)
+            }.sortedWith(compareByDescending<android.speech.tts.Voice> { it.quality }
+                .thenBy { it.latency }).firstOrNull()
             tts.setSpeechRate(1.0f)
             tts.setPitch(1.0f)
             tts.setAudioAttributes(attributes)

@@ -53,7 +53,8 @@ final journeyTransitContextProvider = Provider<JourneyTransitContext>((ref) {
     checklist: draft.checklist,
     checkedItems: draft.checkedItems,
     currentArea: area,
-    remainingDistanceMeters: progress.canReportRemaining
+    remainingDistanceMeters:
+        progress.canReportRemaining && !(route?.isRoadFallback ?? false)
         ? progress.remainingMeters
         : null,
     // Provider duration is a planning estimate from its origin, not a live ETA.
@@ -62,8 +63,8 @@ final journeyTransitContextProvider = Provider<JourneyTransitContext>((ref) {
     routeEstimatesStale: nav.estimatesStale,
     routeRefreshing: nav.refreshing,
     gpsQualityLabel: loc.quality.name,
-    isOffRoute: progress.isOffRoute,
-    isRoadFallback: route?.isRoadFallback ?? false,
+    isOffRoute: progress.isOffRoute && !(route?.isRoadFallback ?? false),
+    routeKind: route?.kind,
     // Overview hints lack step anchors/progression. Do not speak them as next turns.
     nextGuidanceSteps: const <String>[],
   );

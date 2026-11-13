@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../domain/lagos_gazetteer.dart';
+import 'transcription_quality.dart';
 import '../domain/voice_gateway.dart';
 import '../domain/voice_types.dart';
 import 'cloud_http_client.dart';
@@ -13,7 +14,7 @@ import 'pcm_audio_levels.dart';
 import 'wav_encoder.dart';
 
 /// Tap-activated, turn-based cloud speech engine backed by Groq Whisper
-/// (`whisper-large-v3-turbo`).
+/// (`whisper-large-v3`).
 ///
 /// Uses client-side RMS voice activity detection with a 300 ms pre-roll buffer
 /// so silence is never uploaded and initial consonants are never clipped.
@@ -23,12 +24,12 @@ class GroqSpeechEngine implements SpeechEngine {
     Uri? endpoint,
     this.model = const String.fromEnvironment(
       'NAVI_GROQ_STT_MODEL',
-      defaultValue: 'whisper-large-v3-turbo',
+      defaultValue: 'whisper-large-v3',
     ),
     this.prompt = LagosGazetteer.whisperPrompt,
     CloudHttpTransport? http,
-    this.speechThresholdDbfs = -43.0,
-    this.silenceThresholdDbfs = -45.0,
+    this.speechThresholdDbfs = -52.0,
+    this.silenceThresholdDbfs = -55.0,
     this.silenceEndpointFrames =
         15, // 750 ms (15 * 50 ms frames) for natural pauses
     this.minSpeechFrames = 4, // 200 ms minimum voiced speech
@@ -76,9 +77,8 @@ class GroqSpeechEngine implements SpeechEngine {
   int _voicedFrames = 0;
   int _silentFramesAfterSpeech = 0;
   int _consecutiveVoiceDuringPause = 0;
-  int _warmupFrames = 0;
-  double _warmupMinDbfs = 0.0;
-  double _warmupMaxDbfs = -100.0;
+  Uint8List _frame = Uint8List(_frameSamples * 2);
+  int _frameLength = 0;
   double _peakSpeechDbfs = -100.0;
   double _minSpeechWindowDbfs = 0.0;
   double _noiseFloorDbfs = -60.0;
@@ -113,14 +113,13 @@ class GroqSpeechEngine implements SpeechEngine {
     _mode = mode;
     _noiseFloorDbfs = -60.0;
     _hasNoiseEstimate = false;
-    _warmupFrames = 0;
-    _warmupMinDbfs = 0.0;
-    _warmupMaxDbfs = -100.0;
     _resetCaptureBuffer();
   }
 
   void _resetCaptureBuffer() {
     _meter.reset();
+    _frame = Uint8List(_frameSamples * 2);
+    _frameLength = 0;
     _preRoll.clear();
     _preRollLength = 0;
     _speechBuffer.clear();
@@ -147,131 +146,137 @@ class GroqSpeechEngine implements SpeechEngine {
       return;
     }
 
-    final readings = _meter.add(bytes);
-    for (final reading in readings) {
-      if (!_speechDetected) {
-        if (!_hasNoiseEstimate &&
-            reading.rmsDbfs >= speechThresholdDbfs &&
-            reading.rmsDbfs < -25.0) {
-          _warmupFrames++;
-          _warmupMinDbfs = math.min(_warmupMinDbfs, reading.rmsDbfs);
-          _warmupMaxDbfs = math.max(_warmupMaxDbfs, reading.rmsDbfs);
-          if (_warmupFrames < 3 && (_warmupMaxDbfs - _warmupMinDbfs) <= 4.0) {
-            continue;
-          }
-          if ((_warmupMaxDbfs - _warmupMinDbfs) <= 4.0) {
-            _noiseFloorDbfs = _warmupMinDbfs.clamp(-75.0, -28.0);
-            _hasNoiseEstimate = true;
-            continue;
-          }
-        }
-        final dynamicSpeechThreshold = _hasNoiseEstimate
-            ? math.max(
-                speechThresholdDbfs,
-                (_noiseFloorDbfs + 7.0).clamp(-45.0, -24.0),
-              )
-            : speechThresholdDbfs;
-        if (reading.rmsDbfs >= dynamicSpeechThreshold) {
-          _speechDetected = true;
-          _events.add(const SpeechStarted());
-          _voicedFrames = 0;
-          _silentFramesAfterSpeech = 0;
-          _consecutiveVoiceDuringPause = 0;
-          _peakSpeechDbfs = reading.rmsDbfs;
-          _minSpeechWindowDbfs = reading.rmsDbfs;
-          for (final chunk in _preRoll) {
-            _speechBuffer.add(chunk);
-          }
-          _preRoll.clear();
-          _preRollLength = 0;
-          if (_diagnostics) {
-            developer.log(
-              'vad=speech_start rms=${reading.rmsDbfs.toStringAsFixed(1)} '
-              'noiseFloor=${_noiseFloorDbfs.toStringAsFixed(1)} '
-              'threshold=${dynamicSpeechThreshold.toStringAsFixed(1)}',
-              name: 'NAVI.voice',
-            );
-          }
-        } else {
-          final clampedNoise = reading.rmsDbfs.clamp(-75.0, -28.0);
-          if (!_hasNoiseEstimate) {
-            _noiseFloorDbfs = clampedNoise;
-            _hasNoiseEstimate = true;
-          } else {
-            final rate = clampedNoise < _noiseFloorDbfs ? 0.25 : 0.08;
-            _noiseFloorDbfs += (clampedNoise - _noiseFloorDbfs) * rate;
-          }
-          continue;
-        }
-      }
-      if (reading.rmsDbfs > _peakSpeechDbfs) {
-        _peakSpeechDbfs = reading.rmsDbfs;
-      }
-      if (reading.rmsDbfs < _minSpeechWindowDbfs) {
-        _minSpeechWindowDbfs = reading.rmsDbfs;
-      }
-      // Endpoint when energy drops well below speech peak OR settles back down
-      // near the room's measured ambient noise floor.
-      final peakDropFloor = (_peakSpeechDbfs - 16.0).clamp(
-        silenceThresholdDbfs,
-        -28.0,
+    // Slice PCM, not just level measurements, into exact 50 ms frames. Device
+    // chunks may contain several frames or even half a PCM16 sample.
+    var offset = 0;
+    while (offset < bytes.length &&
+        !_transcribing &&
+        _mode == SpeechMode.listening) {
+      final count = math.min(
+        _frame.length - _frameLength,
+        bytes.length - offset,
       );
-      final noiseReturnFloor = _hasNoiseEstimate
-          ? (_noiseFloorDbfs + 4.0).clamp(silenceThresholdDbfs, -26.0)
-          : silenceThresholdDbfs;
-      final effectiveSilenceThreshold = math.max(
-        silenceThresholdDbfs,
-        math.max(peakDropFloor, noiseReturnFloor),
-      );
-      if (reading.rmsDbfs >= effectiveSilenceThreshold) {
-        if (_silentFramesAfterSpeech == 0 ||
-            _consecutiveVoiceDuringPause >= 1) {
-          _voicedFrames++;
-          _silentFramesAfterSpeech = 0;
-          _consecutiveVoiceDuringPause = 0;
-        } else {
-          // Require two consecutive frames above threshold during a pause so
-          // a single 50 ms click or breath does not reset endpointing.
-          _consecutiveVoiceDuringPause++;
-        }
-      } else {
-        _consecutiveVoiceDuringPause = 0;
-        _silentFramesAfterSpeech++;
+      _frame.setRange(_frameLength, _frameLength + count, bytes, offset);
+      _frameLength += count;
+      offset += count;
+      if (_frameLength == _frame.length) {
+        final frame = _frame;
+        _frame = Uint8List(_frameSamples * 2);
+        _frameLength = 0;
+        _processFrame(frame);
       }
+    }
+  }
 
-      // Discard brief mechanical taps (< minSpeechFrames) followed by silence,
-      // and recover if steady background noise triggered onset before noise
-      // floor calibration had idle frames to measure.
-      final briefFalseTrigger =
-          _voicedFrames < minSpeechFrames && _silentFramesAfterSpeech >= 6;
-      final steadyBackgroundNoise =
-          !_hasNoiseEstimate &&
-          _voicedFrames >= 40 &&
-          (_peakSpeechDbfs - _minSpeechWindowDbfs) < 5.0 &&
-          _peakSpeechDbfs < -25.0;
-      if (briefFalseTrigger || steadyBackgroundNoise) {
-        if (steadyBackgroundNoise) {
-          _noiseFloorDbfs = _peakSpeechDbfs.clamp(-75.0, -28.0);
-          _hasNoiseEstimate = true;
-        }
-        _speechBuffer.clear();
-        _preRoll.clear();
-        _preRollLength = 0;
+  void _processFrame(Uint8List frame) {
+    final reading = _meter.add(frame).single;
+    if (!_speechDetected) {
+      final dynamicSpeechThreshold = _hasNoiseEstimate
+          ? math.max(
+              speechThresholdDbfs,
+              (_noiseFloorDbfs + 6.0).clamp(-54.0, -24.0),
+            )
+          : speechThresholdDbfs;
+      if (reading.rmsDbfs >= dynamicSpeechThreshold) {
+        _speechDetected = true;
+        _events.add(const SpeechStarted());
         _voicedFrames = 0;
         _silentFramesAfterSpeech = 0;
         _consecutiveVoiceDuringPause = 0;
-        _peakSpeechDbfs = -100.0;
-        _minSpeechWindowDbfs = 0.0;
-        _speechDetected = false;
+        _peakSpeechDbfs = reading.rmsDbfs;
+        _minSpeechWindowDbfs = reading.rmsDbfs;
+        for (final chunk in _preRoll) {
+          _speechBuffer.add(chunk);
+        }
+        _preRoll.clear();
+        _preRollLength = 0;
+        if (_diagnostics) {
+          developer.log(
+            'vad=speech_start rms=${reading.rmsDbfs.toStringAsFixed(1)} '
+            'noiseFloor=${_noiseFloorDbfs.toStringAsFixed(1)} '
+            'threshold=${dynamicSpeechThreshold.toStringAsFixed(1)}',
+            name: 'NAVI.voice',
+          );
+        }
+      } else {
+        final clampedNoise = reading.rmsDbfs.clamp(-75.0, -28.0);
+        if (!_hasNoiseEstimate) {
+          _noiseFloorDbfs = clampedNoise;
+          _hasNoiseEstimate = true;
+        } else {
+          final rate = clampedNoise < _noiseFloorDbfs ? 0.25 : 0.08;
+          _noiseFloorDbfs += (clampedNoise - _noiseFloorDbfs) * rate;
+        }
+        _retainPreRoll(frame);
+        return;
       }
+    }
+    if (reading.rmsDbfs > _peakSpeechDbfs) {
+      _peakSpeechDbfs = reading.rmsDbfs;
+    }
+    if (reading.rmsDbfs < _minSpeechWindowDbfs) {
+      _minSpeechWindowDbfs = reading.rmsDbfs;
+    }
+    // Endpoint when energy drops well below speech peak OR settles back down
+    // near the room's measured ambient noise floor.
+    final peakDropFloor = (_peakSpeechDbfs - 16.0).clamp(
+      silenceThresholdDbfs,
+      -28.0,
+    );
+    final noiseReturnFloor = _hasNoiseEstimate
+        ? (_noiseFloorDbfs + 4.0).clamp(silenceThresholdDbfs, -26.0)
+        : silenceThresholdDbfs;
+    final effectiveSilenceThreshold = math.max(
+      silenceThresholdDbfs,
+      math.max(peakDropFloor, noiseReturnFloor),
+    );
+    if (reading.rmsDbfs >= effectiveSilenceThreshold) {
+      if (_silentFramesAfterSpeech == 0 || _consecutiveVoiceDuringPause >= 1) {
+        _voicedFrames++;
+        _silentFramesAfterSpeech = 0;
+        _consecutiveVoiceDuringPause = 0;
+      } else {
+        // Require two consecutive frames above threshold during a pause so
+        // a single 50 ms click or breath does not reset endpointing.
+        _consecutiveVoiceDuringPause++;
+      }
+    } else {
+      _consecutiveVoiceDuringPause = 0;
+      _silentFramesAfterSpeech++;
+    }
+
+    // Discard brief mechanical taps (< minSpeechFrames) followed by silence,
+    // and recover if steady background noise triggered onset before noise
+    // floor calibration had idle frames to measure.
+    final briefFalseTrigger =
+        _voicedFrames < minSpeechFrames && _silentFramesAfterSpeech >= 6;
+    final steadyBackgroundNoise =
+        !_hasNoiseEstimate &&
+        _voicedFrames >= 40 &&
+        (_peakSpeechDbfs - _minSpeechWindowDbfs) < 5.0 &&
+        _peakSpeechDbfs < -25.0;
+    if (briefFalseTrigger || steadyBackgroundNoise) {
+      if (steadyBackgroundNoise) {
+        _noiseFloorDbfs = _peakSpeechDbfs.clamp(-75.0, -28.0);
+        _hasNoiseEstimate = true;
+      }
+      _speechBuffer.clear();
+      _preRoll.clear();
+      _preRollLength = 0;
+      _voicedFrames = 0;
+      _silentFramesAfterSpeech = 0;
+      _consecutiveVoiceDuringPause = 0;
+      _peakSpeechDbfs = -100.0;
+      _minSpeechWindowDbfs = 0.0;
+      _speechDetected = false;
     }
 
     if (!_speechDetected) {
-      _retainPreRoll(bytes);
+      _retainPreRoll(frame);
       return;
     }
 
-    _speechBuffer.add(bytes);
+    _speechBuffer.add(frame);
 
     final reachedSilenceEndpoint =
         _voicedFrames >= minSpeechFrames &&
@@ -347,7 +352,7 @@ class GroqSpeechEngine implements SpeechEngine {
           fields: {
             'model': model,
             'language': 'en',
-            'response_format': 'json',
+            'response_format': 'verbose_json',
             'temperature': '0',
             if (prompt.isNotEmpty) 'prompt': prompt,
           },
@@ -363,7 +368,7 @@ class GroqSpeechEngine implements SpeechEngine {
         if (!response.isSuccess) {
           if (_diagnostics) {
             developer.log(
-              'engine=groq_whisper httpStatus=${response.statusCode} body=${response.body}',
+              'engine=groq_whisper httpStatus=${response.statusCode}',
               name: 'NAVI.voice',
             );
           }
@@ -375,11 +380,22 @@ class GroqSpeechEngine implements SpeechEngine {
           _fail(VoiceFailure.unavailable);
           return;
         }
-        final rawText = (decoded['text'] as String? ?? '').trim();
-        if (_isSilenceHallucination(rawText, peakDbfs)) {
+        final rawText = decoded['text'];
+        if (rawText is! String) {
+          _fail(VoiceFailure.unavailable);
+          return;
+        }
+        final quality = TranscriptionQuality.evaluate(decoded);
+        if (quality == TranscriptionQuality.uncertain) {
+          _resetCaptureBuffer();
+          _events.add(const ListeningResumed(needsRepeat: true));
+          return;
+        }
+        if (quality == TranscriptionQuality.noSpeech ||
+            _isSilenceHallucination(rawText, peakDbfs)) {
           if (_diagnostics) {
             developer.log(
-              'engine=groq_whisper dropped_hallucination peakDbfs=${peakDbfs.toStringAsFixed(1)} text="$rawText"',
+              'engine=groq_whisper dropped_hallucination peakDbfs=${peakDbfs.toStringAsFixed(1)}',
               name: 'NAVI.voice',
             );
           }
@@ -393,7 +409,9 @@ class GroqSpeechEngine implements SpeechEngine {
           _events.add(const ListeningResumed());
           return;
         }
-        final text = LagosGazetteer.normalizeTranscript(rawText);
+        // Keep the actual transcript. Place-name suggestions belong to
+        // destination resolution, not a rewrite of everything the user says.
+        final text = rawText.trim();
         if (_diagnostics) {
           developer.log(
             'engine=groq_whisper latencyMs=${clock.elapsedMilliseconds} audioBytes=${pcmBytes.length}',

@@ -37,6 +37,58 @@ Future<void> _prepare(VoiceHarness h, DestinationSuggestions matches) async {
 
 void main() {
   test(
+    'changing travel mode does not repeat the same destination introduction',
+    () async {
+      final h = VoiceHarness();
+      addTearDown(h.container.dispose);
+      final matches = _matches(1);
+      await _prepare(h, matches);
+      final done = h.controller.announceMapEntry(_identity);
+      await flushVoice();
+      h.output.finish();
+      await done;
+      final next = _identity.nextIntent();
+      h.controller.updateTransitContext(
+        JourneyTransitContext(
+          identity: next,
+          isActive: true,
+          destination: 'MTN',
+        ),
+      );
+      await h.controller.announceMapEntry(next);
+      expect(h.outputs, hasLength(1));
+      expect(h.microphones, isEmpty);
+    },
+  );
+  test(
+    'map entry speaks while search is pending and survives arriving matches',
+    () async {
+      final h = VoiceHarness();
+      addTearDown(h.container.dispose);
+      h.controller.updateTransitContext(
+        const JourneyTransitContext(
+          identity: _identity,
+          isActive: true,
+          destination: 'MTN',
+        ),
+      );
+      h.controller.setSurfaceVisible('journey', true);
+      await flushVoice();
+      final done = h.controller.announceMapEntry(_identity);
+      await flushVoice();
+      expect(h.output.messages, hasLength(1));
+      final output = h.output;
+      final matches = _matches(1);
+      await _prepare(h, matches);
+      expect(output.disposed, isFalse);
+      expect(h.microphones, isEmpty);
+      output.finish();
+      await done;
+      await h.controller.announceDestinationChoices(matches.token);
+      expect(h.outputs, hasLength(1));
+    },
+  );
+  test(
     'completed orientation is cleared when the address becomes confirmed',
     () async {
       final h = VoiceHarness();

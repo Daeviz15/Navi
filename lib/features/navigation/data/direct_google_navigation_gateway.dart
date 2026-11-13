@@ -110,7 +110,7 @@ class DirectGoogleNavigationGateway implements NavigationGateway {
     }
     // Prefer scheduled bus transit first; if Google lacks GTFS bus coverage in
     // parts of Lagos, transparently fall back to the real traffic-aware road
-    // corridor so map directions, ETA, and blue route animation still work.
+    // corridor for a clearly labelled preview, without a bus time or stop claims.
     final busTransit = await _computeRoute(
       origin: origin,
       destination: destination,
@@ -164,8 +164,7 @@ class DirectGoogleNavigationGateway implements NavigationGateway {
             'transitPreferences': const {
               'allowedTravelModes': ['BUS'],
             },
-          if (googleTravelMode == 'DRIVE')
-            'routingPreference': 'TRAFFIC_AWARE',
+          if (googleTravelMode == 'DRIVE') 'routingPreference': 'TRAFFIC_AWARE',
         },
         timeout: const Duration(seconds: 14),
       );
@@ -201,8 +200,12 @@ class DirectGoogleNavigationGateway implements NavigationGateway {
         distanceMeters: distance.toDouble(),
         durationSeconds: durationSeconds,
         expiresAt: DateTime.now().add(const Duration(minutes: 5)),
-        isRoadFallback: isRoadFallback,
-        stepHints: _extractStepHints(first),
+        kind: isRoadFallback
+            ? RouteKind.roadCorridor
+            : appMode == TravelMode.bus
+            ? RouteKind.busTransit
+            : RouteKind.walking,
+        stepHints: isRoadFallback ? const [] : _extractStepHints(first),
       );
     } on NavigationFailure {
       rethrow;
@@ -357,7 +360,10 @@ class DirectGoogleNavigationGateway implements NavigationGateway {
         }
         final nav = step['navigationInstruction'];
         final rawInstruction = nav is Map
-            ? nav['instructions']?.toString().replaceAll(RegExp(r'\s+'), ' ').trim()
+            ? nav['instructions']
+                  ?.toString()
+                  .replaceAll(RegExp(r'\s+'), ' ')
+                  .trim()
             : null;
         if (rawInstruction != null && rawInstruction.isNotEmpty) {
           hints.add(rawInstruction);
@@ -417,4 +423,3 @@ class FallbackNavigationGateway implements NavigationGateway {
     }
   }
 }
-

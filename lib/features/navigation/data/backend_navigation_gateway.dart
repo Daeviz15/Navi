@@ -69,7 +69,10 @@ final navigationGatewayProvider =
       if (local && googleKey.isNotEmpty) {
         return FallbackNavigationGateway(
           primary: backend,
-          fallback: DirectGoogleNavigationGateway(apiKey: googleKey, http: http),
+          fallback: DirectGoogleNavigationGateway(
+            apiKey: googleKey,
+            http: http,
+          ),
         );
       }
       return backend;
@@ -228,14 +231,21 @@ class BackendNavigationGateway implements NavigationGateway {
     final encoded = data['encodedPolyline'];
     final distance = data['distanceMeters'];
     final duration = data['durationSeconds'];
+    final kind = RouteKind.values
+        .where((value) => value.wireName == data['kind'])
+        .firstOrNull;
     final expires = DateTime.tryParse('${data['expiresAt']}');
     if (encoded is! String ||
         distance is! num ||
-        duration is! num ||
+        data['source'] != 'google_routes' ||
+        kind == null ||
+        !kind.supports(mode) ||
+        (kind == RouteKind.roadCorridor
+            ? duration != null
+            : duration is! num) ||
         !distance.isFinite ||
         distance < 0 ||
-        !duration.isFinite ||
-        duration < 0 ||
+        (duration is num && (!duration.isFinite || duration < 0)) ||
         data['mode'] != mode.name ||
         expires == null ||
         !expires.isAfter(DateTime.now())) {
@@ -246,7 +256,8 @@ class BackendNavigationGateway implements NavigationGateway {
       origin: origin,
       mode: mode,
       distanceMeters: distance.toDouble(),
-      durationSeconds: duration.toDouble(),
+      kind: kind,
+      durationSeconds: (duration as num?)?.toDouble(),
       expiresAt: expires,
     );
   }

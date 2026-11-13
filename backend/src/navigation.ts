@@ -36,6 +36,7 @@ export interface NavigationService {
   route(input: RouteRequest): Promise<{
     encodedPolyline: string; distanceMeters: number; durationSeconds: number;
     mode: RouteRequest['mode']; expiresAt: string;
+    source: 'google_routes'; kind: 'walking' | 'bus_transit';
   }>;
 }
 
@@ -142,6 +143,8 @@ export class GoogleNavigationService implements NavigationService {
       encodedPolyline: route.polyline.encodedPolyline,
       distanceMeters: route.distanceMeters, durationSeconds: Number.parseFloat(route.duration),
       mode: input.mode, expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      source: 'google_routes' as const,
+      kind: input.mode === 'bus' ? 'bus_transit' as const : 'walking' as const,
     };
   }
 }

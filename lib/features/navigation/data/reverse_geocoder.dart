@@ -7,6 +7,8 @@ import '../../journey/presentation/journey_controller.dart';
 import '../../location/application/location_controller.dart';
 import '../../voice/data/cloud_http_client.dart';
 import '../domain/navigation_gateway.dart';
+import '../domain/area_observation.dart';
+import '../../location/domain/location_gateway.dart';
 import 'direct_google_navigation_gateway.dart';
 
 /// Lightweight reverse-geocoding helper that translates raw GPS fixes into
@@ -126,24 +128,31 @@ final reverseGeocoderProvider = FutureProvider<ReverseGeocoder?>((ref) async {
   return ReverseGeocoder(apiKey: key, http: http);
 });
 
-final currentAreaProvider = NotifierProvider<CurrentAreaController, String?>(
-  CurrentAreaController.new,
+/// One typed owner; this projection is the only current label used by UI/voice.
+final currentAreaProvider = Provider<String?>(
+  (ref) => ref.watch(currentAreaObservationProvider).currentLabel,
 );
+final currentAreaObservationProvider =
+    NotifierProvider<CurrentAreaController, CurrentAreaState>(
+      CurrentAreaController.new,
+    );
 
-/// Maintains a throttled human-readable area label for the user's current fix
-/// while an active trip is running.
-class CurrentAreaController extends Notifier<String?> {
+class CurrentAreaController extends Notifier<CurrentAreaState> {
+  static const _policy = AreaConfidencePolicy();
+  Duration? _lastAttemptAt;
   GeoPoint? _lastLookupPoint;
-  DateTime? _lastLookupAt;
+  Timer? _ticker;
   bool _inFlight = false;
   bool _disposed = false;
   int _generation = 0;
+  Duration get _now => ref.read(locationClockProvider).elapsed;
 
   @override
-  String? build() {
+  CurrentAreaState build() {
     ref.onDispose(() {
       _disposed = true;
       _generation++;
+      _ticker?.cancel();
     });
     ref.listen(
       journeyDraftProvider.select((draft) => (draft.identity, draft.isActive)),
@@ -152,63 +161,113 @@ class CurrentAreaController extends Notifier<String?> {
         _maybeRefresh(ref.read(locationControllerProvider));
       },
     );
-    ref.listen(locationControllerProvider, (_, next) {
-      _maybeRefresh(next);
+    ref.listen(locationControllerProvider, (_, next) => _maybeRefresh(next));
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      _maybeRefresh(ref.read(locationControllerProvider));
     });
     Future.microtask(() {
       if (!_disposed) _maybeRefresh(ref.read(locationControllerProvider));
     });
-    return null;
+    return const CurrentAreaState(AreaStatus.unavailable);
   }
 
   void clear() {
     _generation++;
     _lastLookupPoint = null;
-    _lastLookupAt = null;
+    _lastAttemptAt = null;
     _inFlight = false;
-    state = null;
+    state = const CurrentAreaState(AreaStatus.unavailable);
+  }
+
+  bool _eligibleFix(LocationState location) =>
+      location.phase == LocationPhase.tracking &&
+      location.quality == FixQuality.usable &&
+      _policy.acceptsFix(location.fix, _now, approximate: location.approximate);
+
+  void _withdraw(AreaStatus status) {
+    if (state.status != status) {
+      state = CurrentAreaState(status, observation: state.observation);
+    }
   }
 
   void _maybeRefresh(LocationState location) {
     if (_disposed || !ref.read(journeyDraftProvider).isActive) return;
-    if (!location.hasCurrentFix || location.fix == null) return;
-    final point = GeoPoint(location.fix!.latitude, location.fix!.longitude);
-    if (!point.isValid) return;
-
-    final now = DateTime.now();
-    final previous = _lastLookupPoint;
-    if (previous != null) {
-      final moved = previous.distanceTo(point);
-      final stale =
-          _lastLookupAt == null ||
-          now.difference(_lastLookupAt!) > const Duration(seconds: 90);
-      if (moved < 150 && !(stale && moved >= 50)) return;
+    if (!_eligibleFix(location)) {
+      _withdraw(
+        location.phase == LocationPhase.tracking
+            ? AreaStatus.uncertain
+            : AreaStatus.unavailable,
+      );
+      return;
+    }
+    final fix = location.fix!;
+    final observation = state.observation;
+    if (observation != null &&
+        state.status != AreaStatus.lookupFailed &&
+        _policy.acceptsObservation(observation, fix, _now)) {
+      _withdraw(AreaStatus.current);
+      return;
+    }
+    if (state.status != AreaStatus.lookupFailed) {
+      _withdraw(
+        observation == null ? AreaStatus.unavailable : AreaStatus.stale,
+      );
     }
     if (_inFlight) return;
+    final previousAttempt = _lastAttemptAt;
+    if (previousAttempt != null &&
+        _now - previousAttempt < const Duration(seconds: 15))
+      return;
+    final point = GeoPoint(fix.latitude, fix.longitude);
+    // Failed enrichment backs off. A genuinely new area can retry sooner.
+    if (previousAttempt != null &&
+        (state.status == AreaStatus.unavailable ||
+            state.status == AreaStatus.lookupFailed) &&
+        _lastLookupPoint != null &&
+        _lastLookupPoint!.distanceTo(point) < 50 &&
+        _now - previousAttempt < const Duration(seconds: 30))
+      return;
     _inFlight = true;
+    _lastAttemptAt = _now;
+    _lastLookupPoint = point;
     final generation = _generation;
-    unawaited(_performLookup(point, now, generation));
+    unawaited(_performLookup(fix, _now, generation));
   }
 
   Future<void> _performLookup(
-    GeoPoint point,
-    DateTime timestamp,
+    LocationFix sourceFix,
+    Duration timestamp,
     int generation,
   ) async {
     try {
       final geocoder = await ref.read(reverseGeocoderProvider.future);
-      if (_disposed || generation != _generation || geocoder == null) return;
-      final label = await geocoder.lookupArea(point);
       if (_disposed || generation != _generation) return;
-      _lastLookupPoint = point;
-      _lastLookupAt = timestamp;
-      if (label != null && label.isNotEmpty) {
-        state = label;
+      final label = await geocoder?.lookupArea(
+        GeoPoint(sourceFix.latitude, sourceFix.longitude),
+      );
+      if (_disposed || generation != _generation) return;
+      if (label == null || label.trim().isEmpty) {
+        state = const CurrentAreaState(AreaStatus.lookupFailed);
+        return;
       }
+      final observation = AreaObservation(
+        label: label.trim(),
+        sourceFix: sourceFix,
+        lookedUpAt: timestamp,
+      );
+      final location = ref.read(locationControllerProvider);
+      final eligible =
+          _eligibleFix(location) &&
+          _policy.acceptsObservation(observation, location.fix!, _now);
+      state = CurrentAreaState(
+        eligible ? AreaStatus.current : AreaStatus.stale,
+        observation: observation,
+      );
     } catch (_) {
-      // Reverse geocoding enrichment must never surface errors or break UX.
+      if (!_disposed && generation == _generation) {
+        state = const CurrentAreaState(AreaStatus.lookupFailed);
+      }
     } finally {
-      // An old trip's lookup must not unlock a newer trip's in-flight request.
       if (!_disposed && generation == _generation) _inFlight = false;
     }
   }

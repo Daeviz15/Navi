@@ -33,6 +33,7 @@ class AndroidVoiceOutput implements VoiceGateway {
       defaultValue: 'en-US-Chirp3-HD-Kore',
     ),
     CloudHttpTransport? http,
+    this.synthesisBudget,
   }) : _groqApiKey =
            (groqApiKey ?? const String.fromEnvironment('GROQ_API_KEY')).trim(),
        _googleApiKey =
@@ -67,10 +68,14 @@ class AndroidVoiceOutput implements VoiceGateway {
   static DateTime? _orpheusCooldownUntil;
   static DateTime? _googleTtsCooldownUntil;
   static final Map<String, Uint8List> _wavCache = <String, Uint8List>{};
+  static final _synthesisInFlight = <String, Future<Uint8List?>>{};
 
   final String ttsModel;
   final String ttsVoice;
   final String googleTtsVoice;
+
+  /// Short orientation prompts prefer native speech over a long cloud wait.
+  final Duration? synthesisBudget;
   String _groqApiKey;
   String _googleApiKey;
   String _androidPackage;
@@ -83,6 +88,7 @@ class AndroidVoiceOutput implements VoiceGateway {
   bool _ready = false;
   bool _attached = false;
   bool _disposed = false;
+  int _playbackGeneration = 0;
 
   @override
   Stream<OutputEvent> get events => _events.stream;
@@ -94,24 +100,7 @@ class AndroidVoiceOutput implements VoiceGateway {
     if (!Platform.isAndroid) {
       throw const VoiceException(VoiceFailure.unavailable);
     }
-    if (_groqApiKey.isEmpty && _http is DartIoCloudHttpTransport) {
-      _groqApiKey = await CloudEnvConfig.resolveKey(
-        'GROQ_API_KEY',
-        _groqApiKey,
-      );
-    }
-    if (_googleApiKey.isEmpty && _http is DartIoCloudHttpTransport) {
-      _googleApiKey = await CloudEnvConfig.resolveKey(
-        'GOOGLE_TTS_API_KEY',
-        _googleApiKey,
-      );
-      if (_googleApiKey.isEmpty) {
-        _googleApiKey = await CloudEnvConfig.resolveKey(
-          'GOOGLE_MAPS_API',
-          _googleApiKey,
-        );
-      }
-    }
+    await _resolveKeys();
     // A tap can cancel speech-only guidance while credentials are resolving.
     // A disposed output must never replace the next session's channel handler.
     if (_disposed) throw const VoiceException(VoiceFailure.interrupted);
@@ -140,6 +129,52 @@ class AndroidVoiceOutput implements VoiceGateway {
       );
     }
   }
+
+  Future<void> _resolveKeys() async {
+    if (_groqApiKey.isEmpty && _http is DartIoCloudHttpTransport) {
+      _groqApiKey = await CloudEnvConfig.resolveKey(
+        'GROQ_API_KEY',
+        _groqApiKey,
+      );
+    }
+    if (_googleApiKey.isEmpty && _http is DartIoCloudHttpTransport) {
+      _googleApiKey = await CloudEnvConfig.resolveKey(
+        'GOOGLE_TTS_API_KEY',
+        _googleApiKey,
+      );
+      if (_googleApiKey.isEmpty) {
+        _googleApiKey = await CloudEnvConfig.resolveKey(
+          'GOOGLE_MAPS_API',
+          _googleApiKey,
+        );
+      }
+    }
+  }
+
+  Future<void> prepareSpeech(String message) async {
+    await _resolveKeys();
+    // Android-restricted Google keys need package/certificate headers, which
+    // are unavailable before native initialization. Only prewarm primary audio.
+    if (!_disposed) await _primaryWave(message);
+  }
+
+  Future<Uint8List?> _primaryWave(String message) async {
+    final key = 'primary|${_orpheusKey(message)}';
+    final existing = _synthesisInFlight[key];
+    if (existing != null) return existing;
+    final pending = _synthesizeOrpheusWav(message);
+    _synthesisInFlight[key] = pending;
+    try {
+      return await pending;
+    } finally {
+      if (identical(_synthesisInFlight[key], pending)) {
+        _synthesisInFlight.remove(key);
+      }
+    }
+  }
+
+  String _orpheusKey(String input) =>
+      'orpheus|$ttsModel|$ttsVoice|pcm16|$input';
 
   Future<void> _onEvent(MethodCall call) async {
     if (_disposed || call.arguments is! Map) return;
@@ -175,12 +210,12 @@ class AndroidVoiceOutput implements VoiceGateway {
     try {
       for (final cue in _backchannelCues) {
         if (_disposed) break;
-        if (_wavCache.containsKey(cue)) continue;
-        final diskFile = _diskCacheFile(ttsVoice, cue);
+        if (_wavCache.containsKey(_orpheusKey(cue))) continue;
+        final diskFile = _diskCacheFile('orpheus_${ttsModel}_$ttsVoice', cue);
         if (diskFile != null && await diskFile.exists()) {
           final bytes = await diskFile.readAsBytes();
           if (bytes.length > 44) {
-            _wavCache[cue] = bytes;
+            _wavCache[_orpheusKey(cue)] = bytes;
           }
         }
       }
@@ -198,7 +233,7 @@ class AndroidVoiceOutput implements VoiceGateway {
     for (var i = 0; i < _backchannelCues.length; i++) {
       final cue =
           _backchannelCues[(_fillerIndex + i) % _backchannelCues.length];
-      final bytes = _wavCache[cue];
+      final bytes = _wavCache[_orpheusKey(cue)];
       if (bytes != null) {
         _fillerIndex = (_fillerIndex + i + 1) % _backchannelCues.length;
         unawaited(
@@ -246,10 +281,11 @@ class AndroidVoiceOutput implements VoiceGateway {
     if (_orpheusUnavailable || _groqApiKey.isEmpty || ttsInput.isEmpty) {
       return null;
     }
-    final cached = _wavCache[ttsInput];
+    final cacheKey = _orpheusKey(ttsInput);
+    final cached = _wavCache[cacheKey];
     if (cached != null) return cached;
 
-    final diskFile = _diskCacheFile(ttsVoice, ttsInput);
+    final diskFile = _diskCacheFile('orpheus_${ttsModel}_$ttsVoice', ttsInput);
     if (diskFile != null) {
       try {
         if (await diskFile.exists()) {
@@ -258,7 +294,7 @@ class AndroidVoiceOutput implements VoiceGateway {
             if (_wavCache.length >= 24) {
               _wavCache.remove(_wavCache.keys.first);
             }
-            _wavCache[ttsInput] = diskBytes;
+            _wavCache[cacheKey] = diskBytes;
             return diskBytes;
           }
         }
@@ -293,7 +329,7 @@ class AndroidVoiceOutput implements VoiceGateway {
           if (_wavCache.length >= 24) {
             _wavCache.remove(_wavCache.keys.first);
           }
-          _wavCache[ttsInput] = normalized;
+          _wavCache[cacheKey] = normalized;
           if (diskFile != null) {
             unawaited(
               diskFile
@@ -408,9 +444,31 @@ class AndroidVoiceOutput implements VoiceGateway {
   /// 2. Google Cloud TTS ("en-US-Chirp3-HD-Kore")
   /// 3. Returns null to trigger native Android offline TTS
   Future<Uint8List?> synthesizeWav(String message) async {
-    var wav = await _synthesizeOrpheusWav(message);
-    wav ??= await _synthesizeGoogleCloudWav(message);
-    return wav;
+    final key = '$ttsModel|$ttsVoice|$googleTtsVoice|$message';
+    final existing = _synthesisInFlight[key];
+    if (existing != null) return existing;
+    final pending = () async {
+      var wav = await _primaryWave(message);
+      if (!_disposed) wav ??= await _synthesizeGoogleCloudWav(message);
+      return wav;
+    }();
+    _synthesisInFlight[key] = pending;
+    try {
+      return await pending;
+    } finally {
+      if (identical(_synthesisInFlight[key], pending)) {
+        _synthesisInFlight.remove(key);
+      }
+    }
+  }
+
+  Future<Uint8List?> synthesizeForPlayback(String message) {
+    final pending = synthesizeWav(message);
+    final budget = synthesisBudget;
+    // Late synthesis can warm the cache, but this completed turn cannot replay it.
+    return budget == null
+        ? pending
+        : pending.timeout(budget, onTimeout: () => null);
   }
 
   static void resetStateForTesting() {
@@ -419,6 +477,7 @@ class AndroidVoiceOutput implements VoiceGateway {
     _orpheusCooldownUntil = null;
     _googleTtsCooldownUntil = null;
     _wavCache.clear();
+    _synthesisInFlight.clear();
     try {
       final dir = Directory('${Directory.systemTemp.path}/navi_tts_cache_v1');
       if (dir.existsSync()) {
@@ -431,8 +490,11 @@ class AndroidVoiceOutput implements VoiceGateway {
   Future<void> speak(String message, {required int id}) async {
     if (!_ready) await initialize();
     await stopSpeaking();
-    final wavBytes = await synthesizeWav(message);
-    if (_disposed) throw const VoiceException(VoiceFailure.interrupted);
+    final generation = _playbackGeneration;
+    final wavBytes = await synthesizeForPlayback(message);
+    if (_disposed || generation != _playbackGeneration) {
+      throw const VoiceException(VoiceFailure.interrupted);
+    }
     final completion = _completion = Completer<void>();
     _activeId = id;
     // Attach the error listener before dispatching to the platform.
@@ -446,7 +508,11 @@ class AndroidVoiceOutput implements VoiceGateway {
             'text': message,
           })
         else
-          _channel.invokeMethod<void>('speak', {'id': '$id', 'text': message}),
+          _channel.invokeMethod<void>('speak', {
+            'id': '$id',
+            'text': message,
+            'preferOffline': synthesisBudget != null,
+          }),
         finished,
       ], eagerError: true);
     } catch (_) {
@@ -457,6 +523,7 @@ class AndroidVoiceOutput implements VoiceGateway {
 
   @override
   Future<void> stopSpeaking() async {
+    _playbackGeneration++;
     _activeId = null;
     final completion = _completion;
     _completion = null;
