@@ -1,13 +1,16 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../domain/journey_draft.dart';
+import '../domain/journey_identity.dart';
 
-/// A simple view model for the draft before routing/permissions are added.
+/// Canonical owner of trip intent, preparation and planning/active lifecycle.
 final journeyDraftProvider = NotifierProvider<JourneyController, JourneyDraft>(
   JourneyController.new,
 );
 
 class JourneyController extends Notifier<JourneyDraft> {
+  int _tripSequence = 0;
+
   @override
   JourneyDraft build() => const JourneyDraft();
 
@@ -18,7 +21,49 @@ class JourneyController extends Notifier<JourneyDraft> {
       state = state.copyWith(destination: normalized);
       return;
     }
-    state = JourneyDraft(destination: normalized);
+    state = JourneyDraft(
+      identity: state.isActive
+          ? JourneyIdentity(tripId: ++_tripSequence)
+          : state.identity.nextIntent(),
+      destination: normalized,
+      travelMode: state.travelMode,
+    );
+  }
+
+  void startTrip() {
+    if (state.destination.trim().isEmpty || state.status == TripStatus.active) {
+      return;
+    }
+    state = state.copyWith(status: TripStatus.active);
+  }
+
+  void switchTripDestination(
+    String value, {
+    String? purposeSummary,
+    bool isCasual = false,
+    List<String> checklist = const <String>[],
+  }) {
+    final normalized = value.trim();
+    if (normalized.isEmpty) return;
+    final cleanPurposeSummary = purposeSummary?.trim() ?? '';
+    final nextPurpose = isCasual
+        ? JourneyPurpose.visit
+        : (checklist.isNotEmpty
+              ? JourneyPurpose.errand
+              : JourneyPurpose.unspecified);
+    state = JourneyDraft(
+      identity: state.destination.toLowerCase() == normalized.toLowerCase()
+          ? state.identity
+          : state.identity.nextIntent(),
+      destination: normalized,
+      purpose: nextPurpose,
+      travelMode: state.travelMode,
+      purposeSummary: cleanPurposeSummary,
+      isCasual: isCasual,
+      checklist: List<String>.unmodifiable(checklist),
+      checkedItems: const <String>{},
+      status: TripStatus.active,
+    );
   }
 
   void setPurpose(JourneyPurpose purpose) {
@@ -33,11 +78,13 @@ class JourneyController extends Notifier<JourneyDraft> {
   }) {
     final sameDestination =
         destination == null ||
+        destination.trim().isEmpty ||
         destination.trim().toLowerCase() == state.destination.toLowerCase();
     final nextPurpose = isCasual
         ? JourneyPurpose.visit
         : (checklist.isNotEmpty ? JourneyPurpose.errand : state.purpose);
     state = state.copyWith(
+      identity: sameDestination ? state.identity : state.identity.nextIntent(),
       destination: destination != null && destination.trim().isNotEmpty
           ? destination.trim()
           : state.destination,
@@ -64,8 +111,13 @@ class JourneyController extends Notifier<JourneyDraft> {
   }
 
   void setTravelMode(TravelMode mode) {
-    state = state.copyWith(travelMode: mode);
+    if (mode == state.travelMode) return;
+    state = state.copyWith(
+      identity: state.identity.nextIntent(),
+      travelMode: mode,
+    );
   }
 
-  void reset() => state = const JourneyDraft();
+  void reset() =>
+      state = JourneyDraft(identity: JourneyIdentity(tripId: ++_tripSequence));
 }

@@ -86,7 +86,7 @@ class CompanionController extends Notifier<CompanionFrame> {
       _visible &&
       !_reduceMotion &&
       !_disposed &&
-      (_voicePhase == VoicePhase.off || _voicePhase == VoicePhase.armed);
+      _voicePhase == VoicePhase.off;
 
   void setVisible(bool visible) => setSurfaceVisible('home', visible);
 

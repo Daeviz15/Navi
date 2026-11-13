@@ -1,28 +1,7 @@
-import 'dart:math' as math;
-
 import '../../journey/domain/journey_draft.dart';
-
-class GeoPoint {
-  const GeoPoint(this.latitude, this.longitude);
-  final double latitude;
-  final double longitude;
-
-  bool get isValid =>
-      latitude.isFinite &&
-      longitude.isFinite &&
-      latitude.abs() <= 90 &&
-      longitude.abs() <= 180;
-
-  double distanceTo(GeoPoint other) {
-    const radians = math.pi / 180;
-    final a =
-        math.pow(math.sin((other.latitude - latitude) * radians / 2), 2) +
-        math.cos(latitude * radians) *
-            math.cos(other.latitude * radians) *
-            math.pow(math.sin((other.longitude - longitude) * radians / 2), 2);
-    return 6371000 * 2 * math.asin(math.sqrt(a.clamp(0, 1)));
-  }
-}
+import 'geo_point.dart';
+import 'route_geometry.dart';
+export 'geo_point.dart';
 
 class DestinationPlace {
   const DestinationPlace({
@@ -36,19 +15,27 @@ class DestinationPlace {
 }
 
 class JourneyRoute {
-  const JourneyRoute({
-    required this.points,
+  JourneyRoute({
+    required List<GeoPoint> points,
     required this.origin,
     required this.mode,
     required this.distanceMeters,
     required this.durationSeconds,
     required this.expiresAt,
-  });
+    this.isRoadFallback = false,
+    List<String> stepHints = const <String>[],
+  }) : points = List.unmodifiable(points),
+       stepHints = List.unmodifiable(stepHints);
   final List<GeoPoint> points;
   final GeoPoint origin;
   final TravelMode mode;
   final double distanceMeters, durationSeconds;
   final DateTime expiresAt;
+  final bool isRoadFallback;
+
+  /// Unpositioned overview hints. Never use these as current turn instructions.
+  final List<String> stepHints;
+  late final RouteGeometry geometry = RouteGeometry(points);
 }
 
 class NavigationFailure implements Exception {
@@ -56,8 +43,8 @@ class NavigationFailure implements Exception {
   final String code;
 
   String get message => switch (code) {
-    'not_configured' ||
-    'provider_not_configured' => 'Place search is not available yet.',
+    'not_configured' || 'provider_not_configured' =>
+      'Destination search is not connected yet. Connect map services to confirm a place and show its route.',
     'no_route' || 'bus_route_unavailable' =>
       'No verified route is available for this travel mode. You can try another mode.',
     'outside_service_area' =>

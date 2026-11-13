@@ -48,6 +48,7 @@ void main() {
   Future<void> finish(WidgetTester tester) async {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();
+    container.dispose();
   }
 
   testWidgets(
@@ -157,6 +158,24 @@ void main() {
     await finish(tester);
   });
 
+  testWidgets('permission completion cannot activate a replacement draft', (
+    tester,
+  ) async {
+    gateway.pendingAccess = Completer<LocationAccess>();
+    await start(tester);
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+    expect(gateway.permissionRequests, [true]);
+    final journey = container.read(journeyDraftProvider.notifier);
+    journey.reset();
+    journey.setDestination('Yaba');
+    gateway.pendingAccess!.complete(LocationAccess.precise);
+    await tester.pumpAndSettle();
+    expect(container.read(journeyDraftProvider).isActive, isFalse);
+    expect(naviRouter.routeInformationProvider.value.uri.path, '/initialize');
+    await finish(tester);
+  });
+
   testWidgets(
     'backgrounding pauses the introduction before asking permission',
     (tester) async {
@@ -172,19 +191,52 @@ void main() {
     },
   );
 
-  testWidgets('reduced motion skips the bus lap and system back returns home', (
+  testWidgets(
+    'reduced motion skips the bus lap and system back keeps active trip until ended',
+    (tester) async {
+      gateway.result = LocationAccess.precise;
+      tester.platformDispatcher.accessibilityFeaturesTestValue =
+          FakeAccessibilityFeatures(disableAnimations: true);
+      addTearDown(
+        tester.platformDispatcher.clearAccessibilityFeaturesTestValue,
+      );
+      await start(tester);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('journey-map-preview')), findsOneWidget);
+      expect(gateway.permissionRequests, [true]);
+      expect(gateway.positions.hasListener, isTrue);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('active-trip-card')), findsOneWidget);
+      expect(find.byKey(const ValueKey('resume-map-button')), findsOneWidget);
+      expect(gateway.positions.hasListener, isTrue);
+
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('home-end-trip-button')),
+      );
+      await tester.tap(find.byKey(const ValueKey('home-end-trip-button')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Where are we'), findsOneWidget);
+      expect(gateway.positions.hasListener, isFalse);
+      await finish(tester);
+    },
+  );
+
+  testWidgets('tapping End trip on the map resets the trip and returns home', (
     tester,
   ) async {
+    gateway.result = LocationAccess.precise;
     tester.platformDispatcher.accessibilityFeaturesTestValue =
         FakeAccessibilityFeatures(disableAnimations: true);
     addTearDown(tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
     await start(tester);
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('journey-map-preview')), findsOneWidget);
-    expect(gateway.permissionRequests, [true]);
-    await tester.binding.handlePopRoute();
+    expect(gateway.positions.hasListener, isTrue);
+    await tester.ensureVisible(find.byKey(const ValueKey('end-trip-button')));
+    await tester.tap(find.byKey(const ValueKey('end-trip-button')));
     await tester.pumpAndSettle();
     expect(find.textContaining('Where are we'), findsOneWidget);
+    expect(gateway.positions.hasListener, isFalse);
     await finish(tester);
   });
 }

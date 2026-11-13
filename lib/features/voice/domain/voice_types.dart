@@ -1,9 +1,10 @@
+import '../../journey/domain/journey_identity.dart';
+
 enum SpeechMode { wake, listening, muted }
 
 enum VoicePhase {
   off,
   preparing,
-  armed,
   listening,
   transcribing,
   preparingReply,
@@ -77,6 +78,7 @@ class OutputEvent {
 
 class VoiceSessionState {
   const VoiceSessionState({
+    this.journeyIdentity,
     this.enabled = false,
     this.phase = VoicePhase.off,
     this.transcript = '',
@@ -88,8 +90,12 @@ class VoiceSessionState {
     this.isCasual = false,
     this.checklist = const <String>[],
     this.checklistRevision = 0,
+    this.tripChangeRevision = 0,
+    this.routeLaunchRevision = 0,
+    this.endTripRevision = 0,
   });
 
+  final JourneyIdentity? journeyIdentity;
   final bool enabled;
   final VoicePhase phase;
   final String transcript;
@@ -101,21 +107,26 @@ class VoiceSessionState {
   final bool isCasual;
   final List<String> checklist;
   final int checklistRevision;
+  final int tripChangeRevision;
+  final int routeLaunchRevision;
+  final int endTripRevision;
 
   String get caption => switch (phase) {
-    VoicePhase.off => 'No rush. Ready when you are.',
+    VoicePhase.off => reply.isNotEmpty ? reply : 'Tap Navi to talk.',
     VoicePhase.preparing => 'Getting ready to listen on this device…',
-    VoicePhase.armed => 'Say “Hey Navi” or “Hi Navi”.',
-    VoicePhase.listening => transcript.isEmpty ? 'I’m listening.' : transcript,
+    VoicePhase.listening =>
+      transcript.isEmpty
+          ? 'I’m listening. Tap Navi again to stop.'
+          : transcript,
     VoicePhase.transcribing => 'I heard you. One moment…',
     VoicePhase.preparingReply => reply.isEmpty ? 'One moment…' : reply,
     VoicePhase.speaking => reply,
-    VoicePhase.suspended => 'Hands-free is paused.',
+    VoicePhase.suspended => 'Conversation paused.',
     VoicePhase.error => switch (failure) {
       VoiceFailure.wakeModelMissing =>
         'Navi’s wake model is missing from this build.',
       VoiceFailure.startupTimeout =>
-        'Getting ready took too long. Tap to retry hands-free.',
+        'Getting ready took too long. Tap Navi to try again.',
       VoiceFailure.permissionDenied =>
         'Allow microphone access to talk to Navi.',
       VoiceFailure.offlineVoiceMissing =>
@@ -129,8 +140,8 @@ class VoiceSessionState {
       VoiceFailure.model =>
         'The local speech model could not load. Try restarting the app.',
       VoiceFailure.unavailable =>
-        'Hands-free is available on Android in this version.',
-      _ => 'Hands-free could not continue. Tap to retry.',
+        'Voice services could not connect. Check your connection and try again.',
+      _ => 'Voice could not continue. Tap Navi to try again.',
     },
   };
 }

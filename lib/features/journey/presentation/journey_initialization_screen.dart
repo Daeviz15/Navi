@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../../core/widgets/navi_page.dart';
 import '../../location/application/location_controller.dart';
+import '../application/active_trip_coordinator.dart';
 import 'journey_controller.dart';
 
 class JourneyInitializationScreen extends ConsumerStatefulWidget {
@@ -74,16 +75,25 @@ class _JourneyInitializationScreenState
     if (!_isCurrent || !_foreground || !_introFinished || _permissionInFlight) {
       return;
     }
+    final identity = ref.read(journeyDraftProvider).identity;
     if (!_locationStepDone) {
       _permissionInFlight = true;
       // enable checks existing permission first. It returns after acquisition
       // starts, not after a GPS fix: a weak signal must not trap this screen.
       await ref.read(locationControllerProvider.notifier).enable();
       _permissionInFlight = false;
-      if (!_isCurrent) return;
+      if (!_isCurrent || ref.read(journeyDraftProvider).identity != identity) {
+        return;
+      }
       _locationStepDone = true;
     }
-    if (mounted && _foreground) context.go('/preview');
+    if (mounted && _foreground) {
+      if (ref
+          .read(activeTripCoordinatorProvider)
+          .beginTransit(expectedIdentity: identity)) {
+        context.go('/preview');
+      }
+    }
   }
 
   @override

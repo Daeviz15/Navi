@@ -2,6 +2,12 @@
 
 Guiding principle: **small modular MVVM-ish feature slices**, not speculative enterprise layers.
 
+Current planning reference (2026-11-13):
+[Trip and voice reliability implementation plan](trip_reliability_implementation_plan.md).
+It defines Riverpod ownership, implementation status and the remaining reliability
+work for the current integrations. The foundation descriptions below include historical states and
+should not be read as an up-to-date inventory of implemented features.
+
 ```text
 main.dart → ProviderScope → NaviApp (theme + router)
                                  ├── home presentation

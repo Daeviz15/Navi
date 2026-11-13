@@ -58,13 +58,28 @@ class _JourneyMapCanvasState extends State<JourneyMapCanvas>
   @override
   void didUpdateWidget(JourneyMapCanvas oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.navigation.selected?.id != widget.navigation.selected?.id) {
+      // An explicit new destination starts a new overview. A pan on the previous
+      // destination must not hide the newly accepted cloud/route off screen.
+      _userMovedMap = false;
+      if (widget.navigation.selected != null &&
+          widget.navigation.route == null) {
+        unawaited(_fitDestination());
+      }
+    }
     if (oldWidget.navigation.route != widget.navigation.route) {
       _updateRoute();
-      if (!_userMovedMap && widget.navigation.route != null) {
+      if (!_userMovedMap &&
+          widget.navigation.route != null &&
+          (oldWidget.navigation.route == null ||
+              oldWidget.navigation.selected?.id !=
+                  widget.navigation.selected?.id ||
+              oldWidget.navigation.identity != widget.navigation.identity)) {
         unawaited(_fitRoute());
       }
     }
-    if (!_centred &&
+    if (widget.navigation.route == null &&
+        !_centred &&
         !_userMovedMap &&
         widget.location.hasCurrentFix &&
         _map != null) {
@@ -88,8 +103,9 @@ class _JourneyMapCanvasState extends State<JourneyMapCanvas>
   void _syncFlow() {
     final shouldFlow =
         _sampler != null &&
-        widget.location.hasCurrentFix &&
-        widget.location.quality == FixQuality.usable &&
+        widget.navigation.selected != null &&
+        !widget.navigation.estimatesStale &&
+        !widget.navigation.progress.isOffRoute &&
         _foreground &&
         _visible &&
         !_reduceMotion;
@@ -98,22 +114,26 @@ class _JourneyMapCanvasState extends State<JourneyMapCanvas>
       _flowTimer = null;
       return;
     }
-    _flowTimer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
-      if (mounted) setState(() => _progress = (_progress + 0.017) % 1);
+    // Directional preview along provider geometry, independent of GPS matching.
+    // This highlight never represents the user's actual movement or progress.
+    _flowTimer ??= Timer.periodic(const Duration(milliseconds: 50), (_) {
+      if (mounted) setState(() => _progress = (_progress + 0.0085) % 1);
     });
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _foreground = state == AppLifecycleState.resumed;
-    _syncFlow();
+    setState(() {
+      _foreground = state == AppLifecycleState.resumed;
+      _syncFlow();
+    });
   }
 
   Future<void> _centre() async {
     final fix = widget.location.fix;
     if (_map == null || fix == null || !widget.location.hasCurrentFix) return;
     try {
-      await _map!.animateCamera(
+      await _camera(
         CameraUpdate.newLatLngZoom(
           LatLng(fix.latitude, fix.longitude),
           widget.location.quality == FixQuality.usable ? 16 : 13,
@@ -127,8 +147,25 @@ class _JourneyMapCanvasState extends State<JourneyMapCanvas>
   Future<void> _fitRoute() async {
     final route = widget.navigation.route;
     if (_map == null || route == null) return;
+    await _fitPoints(route.points);
+  }
+
+  Future<void> _fitDestination() async {
+    final destination = widget.navigation.selected;
+    final fix = widget.location.fix;
+    if (destination == null) return;
+    await _fitPoints([
+      destination.point,
+      if (fix != null && widget.location.hasCurrentFix)
+        GeoPoint(fix.latitude, fix.longitude),
+    ]);
+  }
+
+  Future<void> _fitPoints(List<GeoPoint> points) async {
+    if (_map == null || points.isEmpty) return;
+    _centred = true;
     var minLat = 90.0, maxLat = -90.0, minLng = 180.0, maxLng = -180.0;
-    for (final point in route.points) {
+    for (final point in points) {
       minLat = math.min(minLat, point.latitude);
       maxLat = math.max(maxLat, point.latitude);
       minLng = math.min(minLng, point.longitude);
@@ -143,7 +180,7 @@ class _JourneyMapCanvasState extends State<JourneyMapCanvas>
       maxLng += .0001;
     }
     try {
-      await _map!.animateCamera(
+      await _camera(
         CameraUpdate.newLatLngBounds(
           LatLngBounds(
             southwest: LatLng(minLat, minLng),
@@ -155,6 +192,12 @@ class _JourneyMapCanvasState extends State<JourneyMapCanvas>
     } on PlatformException {
       /* Map layout or attachment changed. */
     }
+  }
+
+  Future<void> _camera(CameraUpdate update) {
+    final map = _map;
+    if (map == null) return Future.value();
+    return _reduceMotion ? map.moveCamera(update) : map.animateCamera(update);
   }
 
   Future<BitmapDescriptor> _cloud(Color colour) async {
@@ -245,6 +288,8 @@ class _JourneyMapCanvasState extends State<JourneyMapCanvas>
                 unawaited(_icons(scheme.primary));
                 if (route != null) {
                   unawaited(_fitRoute());
+                } else if (selected != null) {
+                  unawaited(_fitDestination());
                 } else if (widget.location.hasCurrentFix) {
                   _centred = true;
                   unawaited(_centre());

@@ -22,10 +22,12 @@ flutter run --dart-define-from-file=env.json
 - The top-right appearance control switches between dark and light modes. The preference lasts for the current app session.
 - Interactions reset the quiet timer. Background screens and reduced-motion settings suppress discretionary gestures.
 - The home wordmark and appearance control stay fixed while the page scrolls.
-- Tap the microphone icon to start a Push-to-Talk voice turn:
-  - **Speech-to-Text (`GroqSpeechEngine`)**: Streams 16 kHz mono PCM16 audio through a client-side RMS Voice Activity Detector (`-40 dBFS` onset, 750 ms silence endpointing, 300 ms pre-roll ring buffer) and transcribes complete utterances using Groq's `whisper-large-v3-turbo` endpoint (`https://api.groq.com/openai/v1/audio/transcriptions`).
-  - **Conversational & Intent Reasoning (`DeepSeekVoiceAgent`)**: Sends the transcript and available Lagos places to DeepSeek (`deepseek-chat` in strict JSON mode) to produce a concise spoken reply, companion mood, and structured destination action (`select_place`, `clear_place`, `sleep`, or `none`). Falls back automatically to `LocalCommandRouter` when offline or when `DEEPSEEK_API_KEY` is omitted.
-  - **Voice Output (`AndroidVoiceOutput`)**: Speaks the reply via Android's native `TextToSpeech` engine while the Cloud companion animates its speaking cadence, then automatically closes the microphone at the end of a non-follow-up turn so zero background network or battery cost is incurred.
+- Tap **Navi itself** to start a conversation on Home or the journey map. Tap again to stop, including during speech or processing. The ear and microphone buttons have been removed.
+- Conversations continue between replies until destination and purpose are captured. Navi finishes the confirmation before stopping. Casual trips need no checklist; silence and model follow-up flags do not silently end a session. Backgrounding ends capture and requires a fresh tap on return.
+- **Speech-to-text (`GroqSpeechEngine`)**: 16 kHz mono PCM16, client-side VAD with a -43 dBFS onset, 750 ms silence endpoint and 300 ms pre-roll; complete utterances go to Groq Whisper.
+- **Conversation (`DeepSeekVoiceAgent`)**: local Lagos destination/preparation shortcuts plus structured Groq model replies, with optional DeepSeek fallback. The selected journey destination is available as context on the map. Cancellation guards pending replies and conversation history.
+- **Voice output (`AndroidVoiceOutput`)**: Groq Orpheus audio with Android TTS fallback. Capture stops during playback and resumes while the conversation still needs trip details.
+- See [voice behavior and device checks](docs/voice_response_validation.md) and [local maps backend setup](backend/README.md).
 
 ## Assets
 

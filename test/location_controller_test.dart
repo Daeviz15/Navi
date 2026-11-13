@@ -47,6 +47,29 @@ class _Gateway implements LocationGateway {
   }
 }
 
+class _DelayedCancelGateway extends _Gateway {
+  final cancellation = Completer<void>();
+  final sessions = <StreamController<LocationFix>>[];
+  @override
+  Stream<LocationFix> watch() {
+    watchCalls++;
+    final session = StreamController<LocationFix>(
+      onCancel: () => cancellation.future,
+    );
+    sessions.add(session);
+    return session.stream;
+  }
+
+  @override
+  Future<void> close() async {
+    if (!cancellation.isCompleted) cancellation.complete();
+    await super.close();
+    for (final session in sessions) {
+      await session.close();
+    }
+  }
+}
+
 LocationFix _fix({
   Duration received = Duration.zero,
   Duration age = Duration.zero,
@@ -61,6 +84,38 @@ LocationFix _fix({
 );
 
 void main() {
+  test('late stream cancellation cannot reset newer GPS acquisition', () async {
+    final gateway = _DelayedCancelGateway();
+    final container = ProviderContainer(
+      overrides: [
+        locationGatewayProvider.overrideWithValue(gateway),
+        locationClockProvider.overrideWithValue(_Clock()),
+      ],
+    );
+    addTearDown(() async {
+      container.dispose();
+      await gateway.close();
+    });
+    final controller = container.read(locationControllerProvider.notifier);
+    await controller.enable();
+    final resetting = controller.reset();
+    await controller.enable();
+    expect(gateway.sessions, hasLength(2));
+    gateway.sessions.last.add(_fix());
+    await Future<void>.delayed(Duration.zero);
+    expect(
+      container.read(locationControllerProvider).phase,
+      LocationPhase.tracking,
+    );
+    gateway.cancellation.complete();
+    await resetting;
+    expect(
+      container.read(locationControllerProvider).phase,
+      LocationPhase.tracking,
+    );
+    expect(gateway.sessions.last.hasListener, isTrue);
+  });
+
   test(
     'quality separates validity, uncertainty, approximate access and age',
     () {

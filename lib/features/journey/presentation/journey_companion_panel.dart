@@ -1,12 +1,9 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../../core/widgets/navi_companion.dart';
+import '../../../core/widgets/interactive_navi_companion.dart';
 import '../../character/presentation/companion_controller.dart';
 import '../../voice/application/voice_session_controller.dart';
-import '../../voice/domain/voice_types.dart';
 
 class JourneyCompanionPanel extends ConsumerStatefulWidget {
   const JourneyCompanionPanel({super.key});
@@ -47,7 +44,7 @@ class _JourneyCompanionPanelState extends ConsumerState<JourneyCompanionPanel>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _voice.setForeground(
       state == AppLifecycleState.resumed,
-      releaseModels: state != AppLifecycleState.inactive,
+      transient: state == AppLifecycleState.inactive,
     );
     _companion.setSurfaceVisible('journey', state == AppLifecycleState.resumed);
   }
@@ -63,52 +60,35 @@ class _JourneyCompanionPanelState extends ConsumerState<JourneyCompanionPanel>
   @override
   Widget build(BuildContext context) {
     final voice = ref.watch(voiceSessionProvider);
-    final frame = ref.watch(companionProvider);
-    final level = ref.watch(voiceAudioLevelProvider);
     final scheme = Theme.of(context).colorScheme;
     return Column(
       key: const ValueKey('journey-companion'),
       children: [
-        NaviCompanion(
-          size: 144,
-          clip: frame.clip,
-          activity: frame.activity,
-          revision: frame.revision,
-          holdPose: frame.still,
-          repeat: frame.repeat,
-          audioLevel: level,
-          engaged: voice.enabled,
-          onCompleted: () => _companion.clipCompleted(frame.revision),
-          onTap: () => unawaited(_voice.togglePushToTalk()),
+        const InteractiveNaviCompanion(size: 144),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            voice.caption,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
         ),
-        Row(
-          children: [
-            Expanded(
+        if (voice.transcript.isNotEmpty)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 8),
               child: Text(
-                voice.enabled
-                    ? voice.caption
-                    : voice.reply.isNotEmpty
-                    ? voice.reply
-                    : 'I’m right here. Tap to talk.',
+                'You: ${voice.transcript}',
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodySmall,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
               ),
             ),
-            const SizedBox(width: 12),
-            IconButton.filledTonal(
-              tooltip: voice.enabled ? 'Stop talking to Navi' : 'Talk to Navi',
-              onPressed: _voice.togglePushToTalk,
-              icon: Icon(
-                voice.phase == VoicePhase.listening
-                    ? Icons.mic_rounded
-                    : Icons.mic_none_rounded,
-                size: 20,
-                color: scheme.primary,
-              ),
-            ),
-          ],
-        ),
+          ),
       ],
     );
   }

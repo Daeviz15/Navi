@@ -1,8 +1,10 @@
 # Navi: Lagos maps and navigation implementation plan
 
 Date: 2026-11-12
-Status: implementation roadmap. Android map/foreground location foundation is
-implemented for development; physical-device validation and route integration remain pending.
+Status: original implementation roadmap. Map, location, place search, route and
+backend development integrations now exist; active-navigation reliability and
+corridor validation remain unfinished. The current review-driven execution order
+is in [Trip and voice reliability](trip_reliability_implementation_plan.md).
 
 ## 1. Product outcome and scope
 

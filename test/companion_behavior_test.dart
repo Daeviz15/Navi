@@ -114,7 +114,7 @@ void main() {
       expect(frame().activity, CompanionActivity.thinking);
       companion.clipCompleted(revision);
       expect(frame().activity, CompanionActivity.thinking);
-      voice.phase(VoicePhase.armed);
+      voice.phase(VoicePhase.off);
       expect(frame().still, isTrue);
       expect(frame().activity, CompanionActivity.idle);
     },

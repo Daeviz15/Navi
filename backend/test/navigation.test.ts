@@ -114,6 +114,16 @@ test('walking requests use WALK and return provider geometry without invented da
   assert.equal(route.encodedPolyline, '_p~iF~ps|U_ulLnnqC_mqNvxq`@');
 });
 
+test('untyped address components do not reject valid places or bypass Lagos filtering', async () => {
+  const untyped = { longText: 'Local landmark' };
+  const queue = fetchQueue([{ places: [
+    { ...place, addressComponents: [untyped, ...place.addressComponents] },
+    { ...place, id: 'unconfirmed', addressComponents: [untyped] },
+  ] }]);
+  const results = await new GoogleNavigationService('fixture', queue.fetcher).search('Computer Village');
+  assert.deepEqual(results.map((result) => result.id), ['lagos_place']);
+});
+
 test('bus mode rejects rail-only and walking-only provider results', async () => {
   for (const vehicle of [undefined, 'SUBWAY']) {
     const queue = fetchQueue([place, routeResponse(vehicle)]);

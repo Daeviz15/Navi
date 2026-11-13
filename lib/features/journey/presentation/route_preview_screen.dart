@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/widgets/navi_page.dart';
 import '../../navigation/presentation/journey_map_preview.dart';
+import '../application/active_trip_coordinator.dart';
 import 'journey_controller.dart';
 
 class RoutePreviewScreen extends ConsumerWidget {
@@ -32,6 +35,14 @@ class RoutePreviewScreen extends ConsumerWidget {
             .read(journeyDraftProvider.notifier)
             .setTravelMode,
         onBack: () => context.go('/'),
+        onEndTrip: () {
+          unawaited(
+            ref
+                .read(activeTripCoordinatorProvider)
+                .endTrip(expectedIdentity: draft.identity),
+          );
+          context.go('/');
+        },
       ),
     );
   }

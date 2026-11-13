@@ -29,7 +29,6 @@ export async function createApp(config: ServerConfig, dependencies: {
   validateConfig(config);
   const app = Fastify({
     bodyLimit: 4096, requestTimeout: 12000, connectionTimeout: 15000,
-    disableRequestLogging: true,
     // Do not serialize request headers, URLs, bodies or precise trip data.
     logger: false,
   });

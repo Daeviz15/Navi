@@ -63,9 +63,7 @@ class LocationState {
 }
 
 final locationControllerProvider =
-    NotifierProvider.autoDispose<LocationController, LocationState>(
-      LocationController.new,
-    );
+    NotifierProvider<LocationController, LocationState>(LocationController.new);
 
 class LocationController extends Notifier<LocationState> {
   static const _policy = LocationQualityPolicy();
@@ -94,7 +92,13 @@ class LocationController extends Notifier<LocationState> {
   bool _current(int generation) => !_disposed && generation == _generation;
 
   Future<void> enable() async {
-    if (!_visible || _disposed || state.phase == LocationPhase.requesting) {
+    if (_disposed || state.phase == LocationPhase.requesting) {
+      return;
+    }
+    _visible = true;
+    if (_wanted &&
+        (state.phase == LocationPhase.tracking ||
+            state.phase == LocationPhase.acquiring)) {
       return;
     }
     _wanted = true;
@@ -192,14 +196,26 @@ class LocationController extends Notifier<LocationState> {
     if (_disposed || _visible == visible) return;
     _visible = visible;
     if (!visible) {
-      _generation++;
+      final generation = ++_generation;
       await _cancelStreams();
-      if (!_disposed && !_visible && _wanted) {
+      if (_current(generation) && !_visible && _wanted) {
         state = const LocationState(phase: LocationPhase.suspended);
       }
     } else if (_wanted) {
       await _start(requestPermission: false);
     }
+  }
+
+  /// Stops active location streams and clears position state when ending a trip.
+  Future<void> reset() async {
+    _wanted = false;
+    _generation++;
+    // Detach the old handles before publishing idle. Cancellation can finish
+    // after a new enable(); it must never publish over that newer acquisition.
+    final cleanup = _cancelStreams();
+    _visible = true;
+    if (!_disposed) state = const LocationState();
+    await cleanup;
   }
 
   Future<void> openSettings() async {

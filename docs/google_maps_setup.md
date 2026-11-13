@@ -29,7 +29,9 @@ need the Play app-signing certificate fingerprint. Registering only an upload
 certificate does not authorize an app signed by Play's different certificate.
 
 Do not choose Websites or IP addresses for this Android SDK key. The later backend
-will use separate credentials appropriate to its own APIs and deployment.
+uses separate credentials appropriate to its own APIs and deployment. See
+[backend setup](../backend/README.md) for Places API (New), Routes API, local
+phone testing and authenticated remote configuration.
 
 Official guidance:
 - [Maps security](https://developers.google.com/maps/api-security-best-practices)
@@ -61,7 +63,7 @@ use. Existing voice configuration is outside this milestone's scope.
 Enter/say a destination on Home, then tap **Let’s go together**. A short bus
 animation circles the checklist already collected on Home (or a travel-light
 card for casual trips). After the animation, Navi checks location permission,
-prompts only if it needs permission, and opens the full-screen map automatically.
+prompts only if it needs permission, and opens the journey map automatically.
 Declining permission still opens the map with an optional recovery action.
 There is no second purpose-selection screen.
 
@@ -79,9 +81,28 @@ There is no second purpose-selection screen.
   permission states have separate recovery paths.
 - Camera movement does not follow every fix. First usable acquisition can centre
   once if the user has not touched the map; Re-centre is an explicit action.
-- The map has Navi dark/light styling, quieter business labels and a custom
-  position marker. Native attribution is preserved, with map viewport padding
-  measured from the actual bottom panel so controls do not obscure it.
+- The boxed map has Navi dark/light styling, quieter business labels and custom
+  yellow/blue cloud markers. Native attribution stays visible inside the map;
+  the companion, checklist and destination controls sit outside its viewport.
+- Navi remains available above the map. Voice preparation updates the shared
+  journey even after Home has gone off screen. The microphone and companion
+  use surface ownership so navigation between screens does not disable them.
+- Destination search uses the repository's backend. Choose the exact provider
+  result before a blue cloud is shown. A returned road/transit route gets a
+  static path plus a small moving highlight sampled along its real geometry.
+- Search never confirms its first result automatically. Tap the numbered
+  name/address, or tap Navi, say an option number, wait for its complete address
+  readback, then say "yes". "No" rejects that suggestion. `Refine destination`
+  starts a more specific query and clears preparation for the old destination.
+  These controls share Riverpod confirmation state and reject outdated choices.
+- Active movement and estimate expiry retain the route geometry. Refreshes keep
+  the applicable path visible, share one pending request per intent, and enforce
+  cooldown/backoff. Stale planning estimates are labelled; current distance is
+  shown only with an eligible approximate route match. The moving highlight
+  pauses for uncertain/unmatched positions. Overview instructions are not current
+  turn guidance, and provider planning time is not a live remaining ETA.
+- No configured backend produces an explicit connection-required state. A map
+  display key alone cannot resolve a destination or supply a route.
 - Map options contains notices, the existing checklist and debug-only location
   diagnostics. The checklist and checked items survive the transition.
 - A journey-flow scope owns acquisition across initialization -> map. It releases
@@ -89,14 +110,33 @@ There is no second purpose-selection screen.
 - Reduced motion skips the bus lap. Backgrounding pauses the introduction and
   never initiates a permission prompt while the app is hidden.
 
-This version does not resolve the destination to coordinates, draw a real route,
-issue stop alerts, or keep navigation running while the screen is locked. Bus and
-walking selections remain journey-draft choices until route planning is implemented.
+This version provides destination confirmation and route previews once the backend
+is configured. It does not issue stop alerts or keep navigation running while the
+screen is locked. Bus routes require verified provider coverage and are not
+replaced with invented local routes. Automated tests mock Google responses;
+real routes remain unverified until the server key and runtime are connected.
 
 ## Device validation record
 
 Automated tests use injected location gateways/clocks and map configuration.
 They do not contact Google, request permission on a phone, or validate real GPS.
+
+Local integration check on 2026-11-12:
+
+- Confirmed the configured server key differs from the Android Maps key without
+  displaying either credential. Live Places search returned five Lagos results.
+- Public Ikeja test origins produced provider geometry for walking and bus.
+- Started the loopback backend and configured the local app's `NAVI_BACKEND_URL`
+  as `http://127.0.0.1:8080`, with USB reverse forwarding on the TECNO KI7.
+- Rebuilt, installed and launched the debug app on that physical phone. Entered
+  Computer Village, Ikeja and confirmed a provider result in the app.
+- The boxed map displayed the yellow current-position cloud, blue destination
+  cloud and a real bus route. Two captured frames confirmed movement of the blue
+  route highlight. This was a stationary integration check, not a field journey.
+- Production hosting, key restriction auditing, voice timing and stop/arrival
+  accuracy were not established by this check. The computer backend and USB
+  connection are required for this local setup.
+
 Before closing the map/location milestone, record results for:
 
 - [ ] Native map loads with the restricted key on TECNO KI7.
@@ -112,7 +152,11 @@ Before closing the map/location milestone, record results for:
 - [ ] Representative compact layouts and larger text remain usable.
 - [ ] Back from initialization or map returns Home without repeating the purpose question.
 - [ ] Checklist state survives initialization, map and the map's essentials sheet.
-- [ ] Google attribution remains above the destination panel in both orientations.
+- [ ] Google attribution stays visible inside the boxed map in both orientations.
+- [x] Destination search returns provider places; choosing one shows the blue cloud.
+- [x] Provider route geometry and a flowing highlight reach the confirmed place.
+- [ ] Unsupported bus routes show an honest message; walking remains selectable.
+- [ ] Changing destination/mode cannot display a late result for the old journey.
 
 No field positioning accuracy or stop-guidance reliability has been established yet.
-Pilot corridor data, service-area policy and route API contracts remain Phase 0 work.
+Pilot corridor data and arrival-confidence policies remain future work.

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:developer' as developer;
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../domain/lagos_gazetteer.dart';
@@ -11,7 +12,7 @@ import 'cloud_http_client.dart';
 import 'pcm_audio_levels.dart';
 import 'wav_encoder.dart';
 
-/// Push-to-talk / turn-based cloud speech engine backed by Groq Whisper
+/// Tap-activated, turn-based cloud speech engine backed by Groq Whisper
 /// (`whisper-large-v3-turbo`).
 ///
 /// Uses client-side RMS voice activity detection with a 300 ms pre-roll buffer
@@ -74,7 +75,14 @@ class GroqSpeechEngine implements SpeechEngine {
   int _preRollLength = 0;
   int _voicedFrames = 0;
   int _silentFramesAfterSpeech = 0;
+  int _consecutiveVoiceDuringPause = 0;
+  int _warmupFrames = 0;
+  double _warmupMinDbfs = 0.0;
+  double _warmupMaxDbfs = -100.0;
   double _peakSpeechDbfs = -100.0;
+  double _minSpeechWindowDbfs = 0.0;
+  double _noiseFloorDbfs = -60.0;
+  bool _hasNoiseEstimate = false;
   bool _speechDetected = false;
   bool _transcribing = false;
   bool _initialized = false;
@@ -103,18 +111,12 @@ class GroqSpeechEngine implements SpeechEngine {
     if (_disposed) return;
     _epoch++;
     _mode = mode;
+    _noiseFloorDbfs = -60.0;
+    _hasNoiseEstimate = false;
+    _warmupFrames = 0;
+    _warmupMinDbfs = 0.0;
+    _warmupMaxDbfs = -100.0;
     _resetCaptureBuffer();
-    if (_initialized && mode == SpeechMode.wake) {
-      // In wake mode, promote immediately so push-to-talk turns start listening
-      // without requiring a separate offline keyword model.
-      final activeEpoch = _epoch;
-      scheduleMicrotask(() {
-        if (!_disposed && _epoch == activeEpoch && _mode == SpeechMode.wake) {
-          _mode = SpeechMode.listening;
-          _events.add(const WakeDetected('PUSH_TO_TALK'));
-        }
-      });
-    }
   }
 
   void _resetCaptureBuffer() {
@@ -124,24 +126,11 @@ class GroqSpeechEngine implements SpeechEngine {
     _speechBuffer.clear();
     _voicedFrames = 0;
     _silentFramesAfterSpeech = 0;
+    _consecutiveVoiceDuringPause = 0;
     _peakSpeechDbfs = -100.0;
+    _minSpeechWindowDbfs = 0.0;
     _speechDetected = false;
     _transcribing = false;
-  }
-
-  /// Immediately submits any buffered speech when the user taps the mic again
-  /// to finish their turn early.
-  bool flushUtterance() {
-    if (_disposed ||
-        !_initialized ||
-        _mode != SpeechMode.listening ||
-        _transcribing ||
-        !_speechDetected ||
-        _speechBuffer.isEmpty) {
-      return false;
-    }
-    _submitUtterance();
-    return true;
   }
 
   @override
@@ -161,40 +150,119 @@ class GroqSpeechEngine implements SpeechEngine {
     final readings = _meter.add(bytes);
     for (final reading in readings) {
       if (!_speechDetected) {
-        if (reading.rmsDbfs >= speechThresholdDbfs) {
+        if (!_hasNoiseEstimate &&
+            reading.rmsDbfs >= speechThresholdDbfs &&
+            reading.rmsDbfs < -25.0) {
+          _warmupFrames++;
+          _warmupMinDbfs = math.min(_warmupMinDbfs, reading.rmsDbfs);
+          _warmupMaxDbfs = math.max(_warmupMaxDbfs, reading.rmsDbfs);
+          if (_warmupFrames < 3 && (_warmupMaxDbfs - _warmupMinDbfs) <= 4.0) {
+            continue;
+          }
+          if ((_warmupMaxDbfs - _warmupMinDbfs) <= 4.0) {
+            _noiseFloorDbfs = _warmupMinDbfs.clamp(-75.0, -28.0);
+            _hasNoiseEstimate = true;
+            continue;
+          }
+        }
+        final dynamicSpeechThreshold = _hasNoiseEstimate
+            ? math.max(
+                speechThresholdDbfs,
+                (_noiseFloorDbfs + 7.0).clamp(-45.0, -24.0),
+              )
+            : speechThresholdDbfs;
+        if (reading.rmsDbfs >= dynamicSpeechThreshold) {
           _speechDetected = true;
           _events.add(const SpeechStarted());
           _voicedFrames = 0;
           _silentFramesAfterSpeech = 0;
+          _consecutiveVoiceDuringPause = 0;
           _peakSpeechDbfs = reading.rmsDbfs;
+          _minSpeechWindowDbfs = reading.rmsDbfs;
           for (final chunk in _preRoll) {
             _speechBuffer.add(chunk);
           }
           _preRoll.clear();
           _preRollLength = 0;
+          if (_diagnostics) {
+            developer.log(
+              'vad=speech_start rms=${reading.rmsDbfs.toStringAsFixed(1)} '
+              'noiseFloor=${_noiseFloorDbfs.toStringAsFixed(1)} '
+              'threshold=${dynamicSpeechThreshold.toStringAsFixed(1)}',
+              name: 'NAVI.voice',
+            );
+          }
         } else {
+          final clampedNoise = reading.rmsDbfs.clamp(-75.0, -28.0);
+          if (!_hasNoiseEstimate) {
+            _noiseFloorDbfs = clampedNoise;
+            _hasNoiseEstimate = true;
+          } else {
+            final rate = clampedNoise < _noiseFloorDbfs ? 0.25 : 0.08;
+            _noiseFloorDbfs += (clampedNoise - _noiseFloorDbfs) * rate;
+          }
           continue;
         }
       }
       if (reading.rmsDbfs > _peakSpeechDbfs) {
         _peakSpeechDbfs = reading.rmsDbfs;
       }
-      // Adaptive silence check: allow a full 20 dB speech dynamic range and
-      // clamp to <= -39 dBFS so softer words or trailing syllables after an
-      // initial loud word are never mistaken for silence mid-sentence.
-      final adaptiveSilenceFloor = (_peakSpeechDbfs - 20.0).clamp(
+      if (reading.rmsDbfs < _minSpeechWindowDbfs) {
+        _minSpeechWindowDbfs = reading.rmsDbfs;
+      }
+      // Endpoint when energy drops well below speech peak OR settles back down
+      // near the room's measured ambient noise floor.
+      final peakDropFloor = (_peakSpeechDbfs - 16.0).clamp(
         silenceThresholdDbfs,
-        -39.0,
+        -28.0,
       );
-      final effectiveSilenceThreshold =
-          adaptiveSilenceFloor > silenceThresholdDbfs
-          ? adaptiveSilenceFloor
+      final noiseReturnFloor = _hasNoiseEstimate
+          ? (_noiseFloorDbfs + 4.0).clamp(silenceThresholdDbfs, -26.0)
           : silenceThresholdDbfs;
+      final effectiveSilenceThreshold = math.max(
+        silenceThresholdDbfs,
+        math.max(peakDropFloor, noiseReturnFloor),
+      );
       if (reading.rmsDbfs >= effectiveSilenceThreshold) {
-        _voicedFrames++;
-        _silentFramesAfterSpeech = 0;
+        if (_silentFramesAfterSpeech == 0 ||
+            _consecutiveVoiceDuringPause >= 1) {
+          _voicedFrames++;
+          _silentFramesAfterSpeech = 0;
+          _consecutiveVoiceDuringPause = 0;
+        } else {
+          // Require two consecutive frames above threshold during a pause so
+          // a single 50 ms click or breath does not reset endpointing.
+          _consecutiveVoiceDuringPause++;
+        }
       } else {
+        _consecutiveVoiceDuringPause = 0;
         _silentFramesAfterSpeech++;
+      }
+
+      // Discard brief mechanical taps (< minSpeechFrames) followed by silence,
+      // and recover if steady background noise triggered onset before noise
+      // floor calibration had idle frames to measure.
+      final briefFalseTrigger =
+          _voicedFrames < minSpeechFrames && _silentFramesAfterSpeech >= 6;
+      final steadyBackgroundNoise =
+          !_hasNoiseEstimate &&
+          _voicedFrames >= 40 &&
+          (_peakSpeechDbfs - _minSpeechWindowDbfs) < 5.0 &&
+          _peakSpeechDbfs < -25.0;
+      if (briefFalseTrigger || steadyBackgroundNoise) {
+        if (steadyBackgroundNoise) {
+          _noiseFloorDbfs = _peakSpeechDbfs.clamp(-75.0, -28.0);
+          _hasNoiseEstimate = true;
+        }
+        _speechBuffer.clear();
+        _preRoll.clear();
+        _preRollLength = 0;
+        _voicedFrames = 0;
+        _silentFramesAfterSpeech = 0;
+        _consecutiveVoiceDuringPause = 0;
+        _peakSpeechDbfs = -100.0;
+        _minSpeechWindowDbfs = 0.0;
+        _speechDetected = false;
       }
     }
 
@@ -244,18 +312,18 @@ class GroqSpeechEngine implements SpeechEngine {
         .replaceAll(RegExp(r'[^\w\s]'), '')
         .trim();
     if (cleaned.isEmpty) return true;
-    // Whisper commonly hallucinates these phrases on quiet background noise.
+    // Whisper commonly hallucinates these YouTube-style captions on noise.
     if (peakDbfs < -33.0 &&
         const {
-          'thank you',
           'thanks for watching',
           'thank you for watching',
           'subtitles by',
-          'you',
-          'the',
-          'bye',
           'amaraorg',
         }.contains(cleaned)) {
+      return true;
+    }
+    if (peakDbfs < -40.0 &&
+        const {'thank you', 'you', 'the', 'bye'}.contains(cleaned)) {
       return true;
     }
     return false;
@@ -293,6 +361,12 @@ class GroqSpeechEngine implements SpeechEngine {
           return;
         }
         if (!response.isSuccess) {
+          if (_diagnostics) {
+            developer.log(
+              'engine=groq_whisper httpStatus=${response.statusCode} body=${response.body}',
+              name: 'NAVI.voice',
+            );
+          }
           _fail(VoiceFailure.unavailable);
           return;
         }
@@ -303,6 +377,17 @@ class GroqSpeechEngine implements SpeechEngine {
         }
         final rawText = (decoded['text'] as String? ?? '').trim();
         if (_isSilenceHallucination(rawText, peakDbfs)) {
+          if (_diagnostics) {
+            developer.log(
+              'engine=groq_whisper dropped_hallucination peakDbfs=${peakDbfs.toStringAsFixed(1)} text="$rawText"',
+              name: 'NAVI.voice',
+            );
+          }
+          _noiseFloorDbfs = math.max(
+            _noiseFloorDbfs,
+            (peakDbfs - 2.0).clamp(-65.0, -28.0),
+          );
+          _hasNoiseEstimate = true;
           // Ignore quiet room-noise hallucinations and keep listening in-turn.
           _resetCaptureBuffer();
           _events.add(const ListeningResumed());

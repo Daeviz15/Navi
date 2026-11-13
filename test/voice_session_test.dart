@@ -1,475 +1,676 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:navi/features/character/domain/navi_clip.dart';
-import 'package:navi/features/character/presentation/companion_controller.dart';
-import 'package:navi/features/voice/application/voice_dependencies.dart';
-import 'package:navi/features/voice/application/voice_session_controller.dart';
+import 'package:navi/features/journey/application/voice_journey_bridge.dart';
+import 'package:navi/features/journey/domain/journey_identity.dart';
+import 'package:navi/features/journey/presentation/journey_controller.dart';
+import 'package:navi/features/voice/domain/local_command_router.dart';
 import 'package:navi/features/voice/domain/voice_gateway.dart';
 import 'package:navi/features/voice/domain/voice_types.dart';
 
+import 'support/voice_harness.dart';
+
 void main() {
   test(
-    'late output preparation failure is reported on reply without delaying wake readiness',
+    'an external trip edit cancels an old reply and cannot apply its destination',
     () async {
-      final gate = Completer<void>();
-      final harness = Harness(outputGate: gate);
-      addTearDown(harness.container.dispose);
-      await harness.start();
-      expect(harness.microphone.running, isTrue);
-      gate.completeError(
-        const VoiceException(VoiceFailure.offlineVoiceMissing),
-      );
-      await Future<void>.delayed(Duration.zero);
-      harness.speech.emit(const WakeDetected('HEY_NAVI'));
-      harness.speech.emit(const UtteranceEnded('Hey Navi'));
-      await Future<void>.delayed(Duration.zero);
-      expect(harness.state.phase, VoicePhase.error);
-      expect(harness.state.failure, VoiceFailure.offlineVoiceMissing);
-      expect(harness.microphone.running, isFalse);
-      await harness.controller.setEnabled(false);
-    },
-  );
-
-  test(
-    'wake capture starts without waiting for speech output initialization',
-    () async {
-      final speechGate = Completer<void>();
-      final outputGate = Completer<void>();
-      final harness = Harness(speechGate: speechGate, outputGate: outputGate);
-      addTearDown(harness.container.dispose);
-      harness.controller.setHomeVisible(true);
-      await Future<void>.delayed(Duration.zero);
-      final enabling = harness.controller.setEnabled(true);
-      await Future<void>.delayed(Duration.zero);
-      expect(harness.speech.initialized, isTrue);
-      expect(harness.output.initialized, isTrue);
-      expect(harness.microphone.starts, 0);
-      speechGate.complete();
-      await enabling;
-      expect(harness.state.phase, VoicePhase.armed);
-      expect(harness.microphone.running, isTrue);
-      expect(outputGate.isCompleted, isFalse);
-      outputGate.complete();
-      await harness.controller.setEnabled(false);
-    },
-  );
-
-  test('a slow preference write does not delay microphone startup', () async {
-    final preferenceGate = Completer<void>();
-    final harness = Harness(preferenceGate: preferenceGate);
-    addTearDown(() {
-      if (!preferenceGate.isCompleted) preferenceGate.complete();
-      harness.container.dispose();
-    });
-    await harness.start();
-    expect(preferenceGate.isCompleted, isFalse);
-    expect(harness.microphone.running, isTrue);
-    preferenceGate.complete();
-    await harness.controller.setEnabled(false);
-  });
-
-  test(
-    'startup is bounded and a stalled voice engine releases the session',
-    () async {
-      final gate = Completer<void>();
-      final harness = Harness(
-        speechGate: gate,
-        startupTimeout: const Duration(milliseconds: 50),
-      );
-      addTearDown(harness.container.dispose);
-      harness.controller.setHomeVisible(true);
-      await Future<void>.delayed(Duration.zero);
-      await harness.controller.setEnabled(true);
-      expect(harness.state.phase, VoicePhase.error);
-      expect(harness.state.failure, VoiceFailure.startupTimeout);
-      expect(harness.microphone.starts, 0);
-      expect(harness.output.disposed, isTrue);
-    },
-  );
-
-  test(
-    'confirmed wake plus an uncertain transcript acknowledges the user without changing a destination',
-    () async {
-      final harness = Harness();
-      addTearDown(harness.container.dispose);
-      await harness.start();
-      harness.speech.emit(const WakeDetected('HEY_NAVI'));
-      harness.speech.emit(const UtteranceEnded('I LOVE YOU'));
-      await Future<void>.delayed(Duration.zero);
-      expect(
-        harness.output.messages.single,
-        "Hey, I'm listening. Where would you like to go?",
-      );
-      expect(harness.state.destination, isNull);
-      await harness.controller.setEnabled(false);
-    },
-  );
-  test('opt-in is required; denial never initializes native speech', () async {
-    final harness = Harness(permission: false);
-    addTearDown(harness.container.dispose);
-    harness.controller.setHomeVisible(true);
-    await Future<void>.delayed(Duration.zero);
-    expect(harness.microphones, isEmpty);
-    await harness.controller.setEnabled(true, requestPermission: true);
-    expect(harness.state.failure, VoiceFailure.permissionDenied);
-    expect(harness.microphones.single.requested, isTrue);
-    expect(harness.speeches.single.initialized, isFalse);
-    expect(harness.microphones.single.running, isFalse);
-    expect(harness.outputs.single.disposed, isTrue);
-  });
-
-  test(
-    'greeting waits for audio start, ignores duplicates and rearms after silence',
-    () async {
-      final harness = Harness();
-      addTearDown(harness.container.dispose);
-      await harness.start();
-      final companion = harness.container.read(companionProvider.notifier);
-      harness.speech.emit(const WakeDetected('HEY_NAVI'));
-      expect(harness.state.phase, VoicePhase.listening);
-      expect(harness.frame.clip, NaviClips.listening);
-      companion.touched();
-      expect(harness.frame.clip, NaviClips.listening);
-      harness.speech.emit(const UtteranceEnded('HEY NAVIG'));
-      harness.speech.emit(const UtteranceEnded('HEY NAVIG'));
-      await Future<void>.delayed(Duration.zero);
-      expect(harness.output.messages, ['Hey! Where are we heading?']);
-      expect(harness.microphone.running, isFalse);
-      expect(harness.speech.mode, SpeechMode.muted);
-      expect(harness.frame.clip, NaviClips.thinking);
-      harness.output.emit(
-        OutputEvent(harness.output.id! + 1, OutputEventType.started),
-      );
-      expect(harness.state.phase, VoicePhase.preparingReply);
-      harness.output.started();
-      expect(harness.state.phase, VoicePhase.speaking);
-      expect(harness.frame.clip, NaviClips.speaking);
-      final oldRevision = harness.frame.revision;
-      companion.clipCompleted(oldRevision - 1);
-      companion.touched();
-      expect(harness.frame.clip, NaviClips.speaking);
-      harness.output.finish();
-      await Future<void>.delayed(Duration.zero);
-      expect(harness.state.phase, VoicePhase.listening);
-      expect(harness.microphone.running, isTrue);
-      await Future<void>.delayed(VoiceSessionController.followUpTimeout);
-      await Future<void>.delayed(Duration.zero);
-      expect(harness.state.phase, VoicePhase.armed);
-      expect(harness.output.messages, hasLength(1));
-      await harness.controller.setEnabled(false);
-    },
-  );
-
-  test(
-    'one wake utterance fills a destination without launching navigation',
-    () async {
-      final harness = Harness();
-      addTearDown(harness.container.dispose);
-      await harness.start();
-      harness.speech.emit(const WakeDetected('HI_NAVI'));
-      harness.speech.emit(const TranscriptChanged('Hi Navi take me to Lekki'));
-      expect(harness.state.transcript, 'take me to Lekki');
-      harness.speech.emit(const UtteranceEnded('Hi Navi take me to Lekki'));
-      await Future<void>.delayed(Duration.zero);
-      expect(harness.state.destination, 'Lekki');
-      expect(harness.state.destinationRevision, 1);
-      harness.output.started();
-      harness.output.finish();
-      await Future<void>.delayed(Duration.zero);
-      expect(harness.state.phase, VoicePhase.armed);
-      await harness.controller.setEnabled(false);
-    },
-  );
-
-  test(
-    'background and screen departure release resources; resume creates a fresh session',
-    () async {
-      final harness = Harness();
-      addTearDown(harness.container.dispose);
-      await harness.start();
-      harness.speech.emit(const WakeDetected('HEY_NAVI'));
-      harness.speech.emit(const UtteranceEnded('hello navi'));
-      await Future<void>.delayed(Duration.zero);
-      final oldOutput = harness.output;
-      harness.controller.setForeground(false);
-      await Future<void>.delayed(Duration.zero);
-      expect(harness.state.phase, VoicePhase.suspended);
-      expect(harness.state.enabled, isTrue);
-      expect(oldOutput.disposed, isTrue);
-      expect(harness.microphone.running, isFalse);
-      harness.controller.setForeground(true);
-      await Future<void>.delayed(Duration.zero);
-      expect(harness.microphones, hasLength(2));
-      expect(harness.state.phase, VoicePhase.armed);
-      harness.controller.suspendForNavigation();
-      await Future<void>.delayed(Duration.zero);
-      expect(harness.state.phase, VoicePhase.suspended);
-      expect(harness.microphone.running, isFalse);
-    },
-  );
-
-  test('sleep command disables hands-free after the reply', () async {
-    final harness = Harness();
-    addTearDown(harness.container.dispose);
-    await harness.start();
-    harness.speech.emit(const WakeDetected('HEY_NAVI'));
-    harness.speech.emit(const UtteranceEnded('Hey Navi stop listening'));
-    await Future<void>.delayed(Duration.zero);
-    harness.output.started();
-    harness.output.finish();
-    await Future<void>.delayed(Duration.zero);
-    expect(harness.state.phase, VoicePhase.off);
-    expect(harness.preferences.enabled, isFalse);
-    expect(harness.microphone.running, isFalse);
-  });
-
-  test('restored opt-in checks permission without requesting it', () async {
-    final harness = Harness(permission: false, restored: true);
-    addTearDown(harness.container.dispose);
-    harness.controller.setHomeVisible(true);
-    await Future<void>.delayed(Duration.zero);
-    expect(harness.state.phase, VoicePhase.error);
-    expect(harness.microphones.single.requested, isFalse);
-    await harness.controller.setEnabled(false);
-  });
-
-  test('capture failure stops playback and reports the failure', () async {
-    final harness = Harness();
-    addTearDown(harness.container.dispose);
-    await harness.start();
-    harness.speech.emit(const SpeechFailed(VoiceFailure.processingOverrun));
-    await Future<void>.delayed(Duration.zero);
-    expect(harness.state.failure, VoiceFailure.processingOverrun);
-    expect(harness.microphone.disposed, isTrue);
-    expect(harness.output.disposed, isTrue);
-    await harness.controller.setEnabled(false);
-  });
-
-  test(
-    'disabling during initialization cancels startup without starting the microphone',
-    () async {
-      final gate = Completer<void>();
-      final harness = Harness(speechGate: gate);
-      addTearDown(harness.container.dispose);
-      harness.controller.setHomeVisible(true);
-      await Future<void>.delayed(Duration.zero);
-      final enabling = harness.controller.setEnabled(true);
-      await Future<void>.delayed(Duration.zero);
-      expect(harness.state.phase, VoicePhase.preparing);
-      final disabling = harness.controller.setEnabled(false);
-      await Future<void>.delayed(Duration.zero);
-      await Future.wait([enabling, disabling]);
-      expect(harness.state.phase, VoicePhase.off);
-      expect(harness.microphone.starts, 0);
-      expect(harness.output.disposed, isTrue);
-    },
-  );
-
-  test(
-    'live microphone chunks drive voiceAudioLevelProvider and reset on reply or disable',
-    () async {
-      final harness = Harness();
-      addTearDown(harness.container.dispose);
-      await harness.start();
-      final level = harness.container.read(voiceAudioLevelProvider);
-      expect(level.value, 0.0);
-
-      final loudChunk = ByteData(1600);
-      for (var i = 0; i < 800; i++) {
-        loudChunk.setInt16(i * 2, 8192, Endian.little);
-      }
-      harness.microphone.audio.add(loudChunk.buffer.asUint8List());
-      await Future<void>.delayed(Duration.zero);
-      expect(level.value, greaterThan(0.4));
-
-      harness.speech.emit(const WakeDetected('HEY_NAVI'));
-      harness.speech.emit(const UtteranceEnded('Hey Navi'));
-      await Future<void>.delayed(Duration.zero);
-      expect(level.value, 0.0);
-      await harness.controller.setEnabled(false);
-    },
-  );
-}
-
-class Harness {
-  Harness({
-    this.permission = true,
-    bool restored = false,
-    this.outputGate,
-    this.speechGate,
-    Completer<void>? preferenceGate,
-    Duration startupTimeout = const Duration(seconds: 10),
-  }) {
-    preferences = FakePreferences(restored, preferenceGate);
-    container = ProviderContainer(
-      overrides: [
-        voiceServicesProvider.overrideWithValue(
-          VoiceServices(
-            microphone: () {
-              final input = FakeMicrophone(permission);
-              microphones.add(input);
-              return input;
-            },
-            speech: () {
-              final engine = FakeSpeech(speechGate);
-              speeches.add(engine);
-              return engine;
-            },
-            output: () {
-              final voice = FakeOutput(outputGate);
-              outputs.add(voice);
-              return voice;
-            },
-            preferences: preferences,
-            startupTimeout: startupTimeout,
-          ),
+      final reasoner = QueueReasoner([])..pending = Completer<LocalReply>();
+      final h = VoiceHarness(reasoner: reasoner);
+      addTearDown(h.container.dispose);
+      h.container.listen(voiceJourneyBridgeProvider, (_, _) {});
+      final journey = h.container.read(journeyDraftProvider.notifier);
+      journey.setDestination('Ikeja');
+      await h.start();
+      await h.turn('Where am I heading?');
+      expect(h.state.phase, VoicePhase.preparingReply);
+      journey.setDestination('Yaba');
+      await flushVoice();
+      expect(h.state.enabled, isFalse);
+      reasoner.pending!.complete(
+        const LocalReply(
+          LocalIntent.destination,
+          'Going to the old place',
+          destination: 'Lekki',
         ),
-      ],
+      );
+      await flushVoice();
+      expect(h.container.read(journeyDraftProvider).destination, 'Yaba');
+      expect(h.state.reply, isEmpty);
+      expect(h.outputs.every((output) => output.messages.isEmpty), isTrue);
+      await h.controller.toggleConversation();
+      expect(h.state.phase, VoicePhase.listening);
+      expect(
+        h.state.journeyIdentity,
+        h.container.read(journeyDraftProvider).identity,
+      );
+    },
+  );
+
+  test(
+    'telemetry updates in the same trip do not interrupt listening',
+    () async {
+      final h = VoiceHarness();
+      addTearDown(h.container.dispose);
+      const identity = JourneyIdentity(tripId: 5, intentRevision: 2);
+      h.controller.updateTransitContext(
+        const JourneyTransitContext(
+          identity: identity,
+          isActive: true,
+          destination: 'Ikeja',
+        ),
+      );
+      await h.start();
+      h.controller.updateTransitContext(
+        const JourneyTransitContext(
+          identity: identity,
+          isActive: true,
+          destination: 'Ikeja',
+          currentArea: 'Yaba',
+        ),
+      );
+      expect(h.state.enabled, isTrue);
+      expect(h.state.phase, VoicePhase.listening);
+      expect(h.microphone.disposed, isFalse);
+    },
+  );
+
+  test(
+    'a selected map destination can complete with a purpose-only reply',
+    () async {
+      final h = VoiceHarness(
+        reasoner: QueueReasoner([
+          const LocalReply(
+            LocalIntent.purpose,
+            'Ready for your interview.',
+            purposeSummary: 'Job interview',
+            checklist: ['CV'],
+          ),
+        ]),
+      );
+      addTearDown(h.container.dispose);
+      h.controller.setSurfaceVisible('journey', true);
+      await flushVoice();
+      await h.controller.toggleConversation(destination: 'Ikeja');
+      await h.turn('I am going for an interview');
+      await h.finishReply();
+      expect(h.state.enabled, isFalse);
+      expect(h.state.destination, 'Ikeja');
+      expect(h.state.purposeSummary, 'Job interview');
+    },
+  );
+
+  test(
+    'stalled startup reports an error and cannot open capture late',
+    () async {
+      final gate = Completer<void>();
+      final h = VoiceHarness(
+        speechGate: gate,
+        startupTimeout: const Duration(milliseconds: 5),
+      );
+      addTearDown(h.container.dispose);
+      h.controller.setHomeVisible(true);
+      await flushVoice();
+      final start = h.controller.toggleConversation();
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(h.state.failure, VoiceFailure.startupTimeout);
+      expect(h.state.enabled, isFalse);
+      expect(h.microphone.starts, 0);
+      gate.complete();
+      await start.timeout(const Duration(seconds: 1));
+    },
+  );
+
+  test('showing Navi never opens the microphone without a tap', () async {
+    final h = VoiceHarness();
+    addTearDown(h.container.dispose);
+    h.controller.setHomeVisible(true);
+    h.controller.setSurfaceVisible('journey', true);
+    await flushVoice();
+    expect(h.state.enabled, isFalse);
+    expect(h.microphones, isEmpty);
+    h.controller.setForeground(false);
+    h.controller.setForeground(true);
+    await flushVoice();
+    expect(h.microphones, isEmpty);
+    await h.controller.toggleConversation();
+    expect(h.state.phase, VoicePhase.listening);
+    expect(h.microphone.requested, isTrue);
+  });
+
+  test(
+    'a tap opens capture without waiting for output initialization',
+    () async {
+      final gate = Completer<void>();
+      final h = VoiceHarness(outputGate: gate);
+      addTearDown(h.container.dispose);
+      await h.start();
+      expect(h.state.phase, VoicePhase.listening);
+      expect(h.microphone.running, isTrue);
+      gate.complete();
+    },
+  );
+
+  test(
+    'permission denial releases capture and waits for another tap',
+    () async {
+      final h = VoiceHarness(permission: false);
+      addTearDown(h.container.dispose);
+      await h.start();
+      expect(h.state.phase, VoicePhase.error);
+      expect(h.state.enabled, isFalse);
+      expect(h.microphone.disposed, isTrue);
+      expect(h.microphone.starts, 0);
+      expect(h.speech.initialized, isFalse);
+      h.controller.setForeground(false);
+      h.controller.setForeground(true);
+      await flushVoice();
+      expect(h.microphones, hasLength(1));
+    },
+  );
+
+  test(
+    'permission-dialog inactivity does not cancel a deliberate tap',
+    () async {
+      final gate = Completer<void>();
+      final h = VoiceHarness(permissionGate: gate);
+      addTearDown(h.container.dispose);
+      h.controller.setHomeVisible(true);
+      await flushVoice();
+      final start = h.controller.toggleConversation();
+      await flushVoice();
+      h.controller.setForeground(false, transient: true);
+      gate.complete();
+      await start;
+      expect(h.state.phase, VoicePhase.listening);
+      expect(h.microphone.running, isTrue);
+    },
+  );
+
+  test('second tap during startup cancels late initialization', () async {
+    final gate = Completer<void>();
+    final h = VoiceHarness(speechGate: gate);
+    addTearDown(h.container.dispose);
+    h.controller.setHomeVisible(true);
+    await flushVoice();
+    final start = h.controller.toggleConversation();
+    await flushVoice();
+    await h.controller.toggleConversation();
+    gate.complete();
+    await start;
+    await flushVoice();
+    expect(h.state.phase, VoicePhase.off);
+    expect(h.microphone.starts, 0);
+    expect(h.microphone.disposed, isTrue);
+  });
+
+  test(
+    'second tap during microphone startup cannot leave late capture running',
+    () async {
+      final gate = Completer<void>();
+      final h = VoiceHarness(captureGate: gate);
+      addTearDown(h.container.dispose);
+      h.controller.setHomeVisible(true);
+      await flushVoice();
+      final start = h.controller.toggleConversation();
+      await flushVoice();
+      await h.controller.toggleConversation();
+      gate.complete();
+      await start;
+      await flushVoice();
+      expect(h.state.enabled, isFalse);
+      expect(h.microphone.running, isFalse);
+    },
+  );
+
+  testWidgets('a quiet minute does not stop a tapped conversation', (
+    tester,
+  ) async {
+    final h = VoiceHarness();
+    h.controller.setHomeVisible(true);
+    await tester.pump();
+    final start = h.controller.toggleConversation();
+    await tester.pump();
+    await start;
+    await tester.pump(const Duration(minutes: 1));
+    expect(h.state.phase, VoicePhase.listening);
+    expect(h.state.enabled, isTrue);
+    expect(h.microphone.running, isTrue);
+    h.container.dispose();
+    await tester.pump();
+  });
+
+  test(
+    'destination alone stays active despite a false follow-up flag; purpose completes after playback',
+    () async {
+      final h = VoiceHarness(
+        reasoner: QueueReasoner([
+          const LocalReply(
+            LocalIntent.destination,
+            'What brings you there?',
+            destination: 'Ikeja',
+            followUp: false,
+          ),
+          const LocalReply(
+            LocalIntent.purpose,
+            'Your essentials are ready.',
+            purposeSummary: 'SIM registration',
+            checklist: ['NIN', 'ID'],
+            followUp: true,
+          ),
+        ]),
+      );
+      addTearDown(h.container.dispose);
+      h.container.listen(voiceJourneyBridgeProvider, (_, _) {});
+      await h.start();
+      await h.turn('Take me to Ikeja');
+      expect(h.microphone.running, isFalse); // No capture during Navi's reply.
+      await h.finishReply();
+      expect(h.state.phase, VoicePhase.listening);
+      expect(h.state.enabled, isTrue);
+      await h.turn('I need a new SIM');
+      expect(h.state.enabled, isTrue); // Let the final confirmation finish.
+      expect(h.state.checklist, ['NIN', 'ID']);
+      await h.finishReply();
+      expect(h.state.phase, VoicePhase.off);
+      expect(h.microphone.running, isFalse);
+      expect(h.state.reply, 'Your essentials are ready.');
+      expect(
+        h.container.read(journeyDraftProvider).purposeSummary,
+        'SIM registration',
+      );
+    },
+  );
+
+  test('casual purpose completes without requiring a checklist', () async {
+    final h = VoiceHarness(
+      reasoner: QueueReasoner([
+        const LocalReply(
+          LocalIntent.destination,
+          'Enjoy your visit!',
+          destination: 'Yaba',
+          purposeSummary: 'Visiting a friend',
+          isCasual: true,
+        ),
+      ]),
     );
-    controller = container.read(voiceSessionProvider.notifier);
-  }
-  final bool permission;
-  final Completer<void>? outputGate;
-  final Completer<void>? speechGate;
-  late final FakePreferences preferences;
-  late final ProviderContainer container;
-  late final VoiceSessionController controller;
-  final microphones = <FakeMicrophone>[];
-  final speeches = <FakeSpeech>[];
-  final outputs = <FakeOutput>[];
-  FakeMicrophone get microphone => microphones.last;
-  FakeSpeech get speech => speeches.last;
-  FakeOutput get output => outputs.last;
-  VoiceSessionState get state => container.read(voiceSessionProvider);
-  CompanionFrame get frame => container.read(companionProvider);
-  Future<void> start() async {
-    container.listen(companionProvider, (_, _) {});
-    controller.setHomeVisible(true);
-    await Future<void>.delayed(Duration.zero);
-    await controller.setEnabled(true, requestPermission: true);
-    expect(state.phase, VoicePhase.armed);
-  }
+    addTearDown(h.container.dispose);
+    await h.start();
+    await h.turn('I am visiting a friend in Yaba');
+    await h.finishReply();
+    expect(h.state.enabled, isFalse);
+    expect(h.state.checklist, isEmpty);
+    expect(h.state.isCasual, isTrue);
+  });
+
+  test(
+    'purpose supplied before destination survives into the locked journey',
+    () async {
+      final h = VoiceHarness(
+        reasoner: QueueReasoner([
+          const LocalReply(
+            LocalIntent.purpose,
+            'Where is the interview?',
+            purposeSummary: 'Job interview',
+            checklist: ['CV'],
+          ),
+          const LocalReply(
+            LocalIntent.destination,
+            'Ikeja, got it.',
+            destination: 'Ikeja',
+          ),
+        ]),
+      );
+      addTearDown(h.container.dispose);
+      h.container.listen(voiceJourneyBridgeProvider, (_, _) {});
+      await h.start();
+      await h.turn('I have an interview');
+      await h.finishReply();
+      expect(h.state.enabled, isTrue);
+      await h.turn('In Ikeja');
+      await h.finishReply();
+      expect(h.state.enabled, isFalse);
+      expect(
+        h.container.read(journeyDraftProvider).purposeSummary,
+        'Job interview',
+      );
+      expect(h.state.checklist, ['CV']);
+    },
+  );
+
+  test(
+    'second tap stops playback instead of restarting the microphone',
+    () async {
+      final h = VoiceHarness();
+      addTearDown(h.container.dispose);
+      await h.start();
+      await h.turn('Hello Navi');
+      h.output.started();
+      expect(h.state.phase, VoicePhase.speaking);
+      await h.controller.toggleConversation();
+      await flushVoice();
+      expect(h.state.phase, VoicePhase.off);
+      expect(h.microphone.starts, 1);
+      expect(h.output.disposed, isTrue);
+    },
+  );
+
+  test(
+    'second tap while transcribing cancels rather than flushing the utterance',
+    () async {
+      final h = VoiceHarness();
+      addTearDown(h.container.dispose);
+      await h.start();
+      h.speech.emit(const SpeechStarted());
+      h.speech.emit(const TranscriptionStarted());
+      expect(h.state.phase, VoicePhase.transcribing);
+      await h.controller.toggleConversation();
+      expect(h.state.phase, VoicePhase.off);
+      expect(h.output.messages, isEmpty);
+    },
+  );
+
+  test(
+    'late model completion after a stop cannot change the journey or speak',
+    () async {
+      final reasoner = QueueReasoner([])..pending = Completer<LocalReply>();
+      final h = VoiceHarness(reasoner: reasoner);
+      addTearDown(h.container.dispose);
+      h.container.listen(voiceJourneyBridgeProvider, (_, _) {});
+      await h.start();
+      await h.turn('My trip request');
+      await h.controller.toggleConversation();
+      reasoner.pending!.complete(
+        const LocalReply(
+          LocalIntent.destination,
+          'Ready.',
+          destination: 'Ikeja',
+          purposeSummary: 'Interview',
+        ),
+      );
+      await flushVoice();
+      expect(h.state.destination, isNull);
+      expect(h.container.read(journeyDraftProvider).destination, isEmpty);
+      expect(h.output.messages, isEmpty);
+    },
+  );
+
+  test(
+    'backgrounding stops capture and returning never starts it without another tap',
+    () async {
+      final h = VoiceHarness();
+      addTearDown(h.container.dispose);
+      await h.start();
+      h.controller.setForeground(false);
+      await flushVoice();
+      expect(h.microphone.running, isFalse);
+      expect(h.state.enabled, isFalse);
+      h.controller.setForeground(true);
+      await flushVoice();
+      expect(h.microphones, hasLength(1));
+      await h.controller.toggleConversation();
+      expect(h.microphones, hasLength(2));
+      expect(h.microphone.running, isTrue);
+    },
+  );
+
+  test(
+    'home-to-map ownership handoff preserves the same active conversation',
+    () async {
+      final h = VoiceHarness();
+      addTearDown(h.container.dispose);
+      await h.start();
+      h.controller.setSurfaceVisible('journey', true);
+      h.controller.setHomeVisible(false);
+      await flushVoice();
+      expect(h.state.phase, VoicePhase.listening);
+      expect(h.microphone.starts, 1);
+      await h.controller.toggleConversation();
+      expect(h.microphone.running, isFalse);
+    },
+  );
+
+  test(
+    'a new tap does not reuse an old purpose to finish on a greeting',
+    () async {
+      final h = VoiceHarness(
+        reasoner: QueueReasoner([
+          const LocalReply(
+            LocalIntent.destination,
+            'Ready.',
+            destination: 'Ikeja',
+            purposeSummary: 'Interview',
+          ),
+          const LocalReply(
+            LocalIntent.greeting,
+            'Where to?',
+            destination: 'Ikeja',
+            purposeSummary: 'Interview',
+            followUp: false,
+          ),
+        ]),
+      );
+      addTearDown(h.container.dispose);
+      await h.start();
+      await h.turn('Interview in Ikeja');
+      await h.finishReply();
+      expect(h.state.enabled, isFalse);
+      await h.controller.toggleConversation();
+      await h.turn('Hello');
+      await h.finishReply();
+      expect(h.state.enabled, isTrue);
+      expect(h.state.phase, VoicePhase.listening);
+    },
+  );
+
+  test(
+    'transcription resumes after empty speech and answers each final event once',
+    () async {
+      final reasoner = QueueReasoner([
+        const LocalReply(LocalIntent.clarify, 'Which place?'),
+      ]);
+      final h = VoiceHarness(reasoner: reasoner);
+      addTearDown(h.container.dispose);
+      await h.start();
+      h.speech.emit(const SpeechStarted());
+      h.speech.emit(const TranscriptionStarted());
+      h.speech.emit(const ListeningResumed());
+      expect(h.state.phase, VoicePhase.listening);
+      await h.turn('');
+      expect(h.output.messages, isEmpty);
+      h.speech.emit(const UtteranceEnded('some place'));
+      h.speech.emit(const UtteranceEnded('some place'));
+      await flushVoice();
+      expect(reasoner.calls, 1);
+      expect(h.output.messages, hasLength(1));
+    },
+  );
+
+  test(
+    'capture failure releases resources and waits for an explicit tap',
+    () async {
+      final h = VoiceHarness();
+      addTearDown(h.container.dispose);
+      await h.start();
+      h.speech.emit(const SpeechFailed(VoiceFailure.processingOverrun));
+      await flushVoice();
+      expect(h.state.phase, VoicePhase.error);
+      expect(h.state.enabled, isFalse);
+      expect(h.microphone.disposed, isTrue);
+    },
+  );
+
+  test('microphone energy follows capture and resets on stop', () async {
+    final h = VoiceHarness();
+    addTearDown(h.container.dispose);
+    await h.start();
+    final bytes = ByteData(1600);
+    for (var i = 0; i < 800; i++) {
+      bytes.setInt16(i * 2, 12000, Endian.little);
+    }
+    h.microphone.audio.add(bytes.buffer.asUint8List());
+    expect(h.controller.audioLevel.value, greaterThan(0));
+    await h.controller.toggleConversation();
+    expect(h.controller.audioLevel.value, 0);
+  });
+
+  test(
+    'active transit Q&A stays open across follow-up turns without closing early',
+    () async {
+      final reasoner = _ConversationAwareQueueReasoner([
+        const LocalReply(
+          LocalIntent.clarify,
+          'You are near Admiralty Way, about 1.4 km from Lekki Phase 1.',
+          purposeSummary: 'Client meeting',
+          followUp: true,
+        ),
+        const LocalReply(
+          LocalIntent.clarify,
+          'Keep heading straight along Admiralty Way.',
+          purposeSummary: 'Client meeting',
+          followUp: true,
+        ),
+      ]);
+      final h = VoiceHarness(reasoner: reasoner);
+      addTearDown(h.container.dispose);
+      h.controller.updateTransitContext(
+        const JourneyTransitContext(
+          isActive: true,
+          destination: 'Lekki Phase 1',
+          currentArea: 'Admiralty Way',
+          remainingDistanceMeters: 1400,
+          remainingDurationSeconds: 360,
+          purposeSummary: 'Client meeting',
+        ),
+      );
+      expect(reasoner.transitUpdates, isNotEmpty);
+
+      await h.start();
+      await h.turn('Where am I right now?');
+      await h.finishReply();
+      expect(h.state.enabled, isTrue);
+      expect(h.state.phase, VoicePhase.listening);
+
+      await h.turn('Should I turn soon?');
+      await h.finishReply();
+      expect(h.state.enabled, isTrue);
+      expect(h.state.phase, VoicePhase.listening);
+      expect(h.state.tripChangeRevision, 0);
+      expect(h.state.endTripRevision, 0);
+    },
+  );
+
+  test(
+    'mid-trip change emits tripChangeRevision and routeLaunchRevision and updates draft',
+    () async {
+      final reasoner = _ConversationAwareQueueReasoner([
+        const LocalReply(
+          LocalIntent.clarify,
+          'Okay, changing to Ikeja. What for?',
+          destination: 'Ikeja',
+          changeTrip: true,
+          followUp: true,
+        ),
+        const LocalReply(
+          LocalIntent.purpose,
+          'Got it, preparing your route to Ikeja.',
+          destination: 'Ikeja',
+          purposeSummary: 'Swap SIM card',
+          checklist: ['NIN', 'ID card'],
+          changeTrip: true,
+          followUp: false,
+        ),
+      ]);
+      final h = VoiceHarness(reasoner: reasoner);
+      addTearDown(h.container.dispose);
+      h.container.listen(voiceJourneyBridgeProvider, (_, _) {});
+      h.controller.updateTransitContext(
+        const JourneyTransitContext(
+          isActive: true,
+          destination: 'Lekki Phase 1',
+          currentArea: 'Admiralty Way',
+          remainingDistanceMeters: 1400,
+          remainingDurationSeconds: 360,
+          purposeSummary: 'Client meeting',
+        ),
+      );
+
+      await h.start();
+      await h.turn('Change my trip to Ikeja');
+      await h.finishReply();
+      expect(h.state.enabled, isTrue);
+      expect(h.state.tripChangeRevision, 1);
+      expect(h.state.routeLaunchRevision, 0);
+
+      await h.turn('To swap my SIM card');
+      await h.finishReply();
+      expect(h.state.tripChangeRevision, greaterThanOrEqualTo(1));
+      expect(h.state.routeLaunchRevision, 1);
+      expect(h.state.enabled, isFalse);
+
+      final draft = h.container.read(journeyDraftProvider);
+      expect(draft.destination, 'Ikeja');
+      expect(draft.purposeSummary, 'Swap SIM card');
+      expect(draft.checklist, ['NIN', 'ID card']);
+    },
+  );
+
+  test('explicit endTrip emits endTripRevision after TTS finishes', () async {
+    final reasoner = _ConversationAwareQueueReasoner([
+      const LocalReply(
+        LocalIntent.clarify,
+        'Ending your trip now.',
+        endTrip: true,
+        followUp: false,
+      ),
+    ]);
+    final h = VoiceHarness(reasoner: reasoner);
+    addTearDown(h.container.dispose);
+    h.container.listen(voiceJourneyBridgeProvider, (_, _) {});
+    h.controller.updateTransitContext(
+      const JourneyTransitContext(
+        isActive: true,
+        destination: 'Lekki Phase 1',
+        currentArea: 'Admiralty Way',
+        remainingDistanceMeters: 500,
+        remainingDurationSeconds: 120,
+      ),
+    );
+
+    await h.start();
+    await h.turn('End my trip');
+    await h.finishReply();
+    expect(h.state.endTripRevision, 1);
+    expect(h.state.enabled, isFalse);
+  });
 }
 
-class FakePreferences implements VoicePreferences {
-  FakePreferences(this.enabled, [this.gate]);
-  final Completer<void>? gate;
-  bool enabled;
-  @override
-  Future<bool> readEnabled() async => enabled;
-  @override
-  Future<void> writeEnabled(bool value) async {
-    await gate?.future;
-    enabled = value;
-  }
-}
+class _ConversationAwareQueueReasoner extends QueueReasoner
+    implements ConversationAwareReasoner {
+  _ConversationAwareQueueReasoner(super.replies);
 
-class FakeMicrophone implements MicrophoneInput {
-  FakeMicrophone(this.permission);
-  final bool permission;
-  bool requested = false, running = false, disposed = false;
-  int starts = 0;
-  final audio = StreamController<Uint8List>.broadcast();
+  final List<JourneyTransitContext> transitUpdates = <JourneyTransitContext>[];
+  String? selectedDestination;
+  int clearCalls = 0;
+
   @override
-  Future<bool> hasPermission({required bool request}) async {
-    requested = request;
-    return permission;
+  void setDestinationContext(String destination) {
+    selectedDestination = destination;
   }
 
   @override
-  Future<Stream<Uint8List>> start() async {
-    running = true;
-    starts++;
-    return audio.stream;
+  void updateTransitContext(
+    JourneyTransitContext context, {
+    bool resetPendingSwitch = false,
+  }) {
+    transitUpdates.add(context);
   }
 
   @override
-  Future<void> stop() async {
-    running = false;
+  void clearTripContext() {
+    clearCalls++;
   }
 
   @override
-  Future<void> dispose() async {
-    disposed = true;
-    running = false;
-    await audio.close();
-  }
-}
-
-class FakeSpeech implements SpeechEngine {
-  FakeSpeech([this.gate]);
-  final Completer<void>? gate;
-  final stream = StreamController<SpeechEvent>.broadcast(sync: true);
-  bool initialized = false;
-  SpeechMode mode = SpeechMode.muted;
-  void emit(SpeechEvent event) => stream.add(event);
-  @override
-  Stream<SpeechEvent> get events => stream.stream;
-  @override
-  Future<void> initialize() async {
-    initialized = true;
-    await gate?.future;
-  }
-
-  @override
-  void setMode(SpeechMode value) {
-    mode = value;
-  }
-
-  @override
-  void addAudio(Uint8List bytes) {}
-  @override
-  Future<void> dispose() async {
-    await stream.close();
-  }
-}
-
-class FakeOutput implements VoiceGateway {
-  FakeOutput(this.gate);
-  final Completer<void>? gate;
-  final stream = StreamController<OutputEvent>.broadcast(sync: true);
-  final messages = <String>[];
-  Completer<void>? completion;
-  bool disposed = false, initialized = false;
-  int? id;
-  void emit(OutputEvent event) => stream.add(event);
-  void started() => emit(OutputEvent(id!, OutputEventType.started));
-  void finish() {
-    emit(OutputEvent(id!, OutputEventType.completed));
-    completion!.complete();
-    completion = null;
-  }
-
-  @override
-  Stream<OutputEvent> get events => stream.stream;
-  @override
-  Future<void> initialize() async {
-    initialized = true;
-    await gate?.future;
-  }
-
-  @override
-  Future<void> speak(String text, {required int id}) {
-    this.id = id;
-    messages.add(text);
-    completion = Completer<void>();
-    return completion!.future;
-  }
-
-  @override
-  Future<void> stopSpeaking() async {
-    completion?.complete();
-    completion = null;
-  }
-
-  @override
-  Future<void> dispose() async {
-    disposed = true;
-    if (gate != null && !gate!.isCompleted) gate!.complete();
-    await stopSpeaking();
-    await stream.close();
-  }
+  void cancelPendingReply() {}
 }

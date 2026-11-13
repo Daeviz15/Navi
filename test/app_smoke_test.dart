@@ -63,31 +63,18 @@ void main() {
     },
   );
 
-  testWidgets('defaults to black and switches themes without losing input', (
+  testWidgets('uses black dark mode only without a theme toggle', (
     tester,
   ) async {
     await tester.pumpWidget(const ProviderScope(child: NaviApp()));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextFormField), 'Lekki');
 
-    var theme = Theme.of(tester.element(find.byType(Scaffold).first));
+    final theme = Theme.of(tester.element(find.byType(Scaffold).first));
     expect(theme.brightness, Brightness.dark);
     expect(theme.scaffoldBackgroundColor, Colors.black);
     expect(theme.colorScheme.primary, NaviColors.gold);
-
-    await tester.tap(find.byTooltip('Switch to light mode'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    theme = Theme.of(tester.element(find.byType(Scaffold).first));
-    expect(theme.brightness, Brightness.light);
-    expect(find.text('Lekki'), findsOneWidget);
-
-    await tester.tap(find.byTooltip('Switch to dark mode'));
-    await tester.pumpAndSettle();
-    expect(
-      Theme.of(tester.element(find.byType(Scaffold).first)).brightness,
-      Brightness.dark,
-    );
+    expect(find.byTooltip('Switch to light mode'), findsNothing);
+    expect(find.byTooltip('Switch to dark mode'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -115,10 +102,6 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
-    expect(
-      tester.getRect(find.text('navi')).right,
-      lessThan(tester.getRect(find.byTooltip('Enable hands-free')).left),
-    );
     await tester.ensureVisible(find.byType(TextFormField));
     await tester.tap(find.byType(TextFormField));
     tester.view.viewInsets = const FakeViewPadding(bottom: 240);
@@ -196,9 +179,10 @@ void main() {
       lessThan(headingPosition.dy),
     );
     expect(
-      find.byTooltip('Switch to light mode').hitTestable(),
+      find.text('navi').hitTestable(),
       findsOneWidget,
     );
+    expect(find.byTooltip('Switch to light mode'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 

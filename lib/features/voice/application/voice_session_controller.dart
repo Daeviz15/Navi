@@ -4,12 +4,15 @@ import 'dart:developer' as developer;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../journey/domain/journey_identity.dart';
+import '../../navigation/domain/destination_selection.dart';
 import '../data/android_voice_output.dart';
-import '../data/groq_speech_engine.dart';
 import '../data/pcm_audio_levels.dart';
 import '../domain/local_command_router.dart';
+import '../domain/destination_confirmation_policy.dart';
 import '../domain/voice_gateway.dart';
 import '../domain/voice_types.dart';
+import '../domain/trip_conversation_progress.dart';
 import 'voice_dependencies.dart';
 
 final voiceSessionProvider =
@@ -26,29 +29,37 @@ final voiceAudioLevelProvider = Provider<ValueListenable<double>>(
 /// Owns the foreground voice session. Widgets send intent and visibility only.
 /// Session and utterance IDs guard every asynchronous result and native event.
 class VoiceSessionController extends Notifier<VoiceSessionState> {
-  static const commandTimeout = Duration(seconds: 14);
-  static const followUpTimeout = Duration(seconds: 8);
   static const audioMeterWindowSamples = 800; // 50 ms at 16 kHz mono PCM16.
   final _commands = const LocalCommandRouter();
+  final _destinationConfirmation = const DestinationConfirmationPolicy();
+  DestinationReadback? _destinationReadback;
   final _audioMeter = PcmAudioMeter(windowSamples: audioMeterWindowSamples);
   final _audioLevel = ValueNotifier<double>(0.0);
   late VoiceServices _services;
   _VoiceRun? _run;
+  _GuidanceOutput? _guidance;
+  DestinationSearchToken? _guidanceToken;
+  JourneyIdentity? _lastGuidedIntent;
+  bool _showingGuidance = false;
   Future<void> _operations = Future.value();
-  Future<void> _preferenceWrites = Future.value();
   Timer? _deadline;
   Timer? _startupDeadline;
   int _generation = 0;
   int _runGeneration = -1;
-  int _settingsRevision = 0;
   int _utteranceId = 0;
   int _destinationRevision = 0;
   int _checklistRevision = 0;
+  int _tripChangeRevision = 0;
+  int _routeLaunchRevision = 0;
+  int _endTripRevision = 0;
   bool _enabled = false;
   final _visibleSurfaces = <String>{};
   bool _foreground = true;
   bool _disposed = false;
-  bool _wakeTurn = false;
+  bool _isTransitActive = false;
+  bool _pendingRouteLaunch = false;
+  JourneyTransitContext _transitContext = const JourneyTransitContext();
+  TripConversationProgress _conversation = const TripConversationProgress();
   bool _isCasual = false;
   String _rawTranscript = '';
   String _reply = '';
@@ -59,8 +70,9 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
 
   ValueListenable<double> get audioLevel => _audioLevel;
 
-  bool get _homeVisible => _visibleSurfaces.isNotEmpty;
-  bool get _shouldRun => _enabled && _homeVisible && _foreground && !_disposed;
+  bool get _surfaceVisible => _visibleSurfaces.isNotEmpty;
+  bool get _shouldRun =>
+      _enabled && _surfaceVisible && _foreground && !_disposed;
 
   @override
   VoiceSessionState build() {
@@ -75,31 +87,36 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
       final run = _run;
       _run = null;
       if (run != null) unawaited(run.dispose());
+      final guidance = _guidance;
+      _guidance = null;
+      if (guidance != null) unawaited(guidance.dispose());
     });
-    Future.microtask(_restore);
     return const VoiceSessionState();
   }
 
-  Future<void> _restore() async {
-    if (!_services.wakeRequired) return;
-    final revision = _settingsRevision;
-    try {
-      final enabled = await _services.preferences.readEnabled();
-      if (_disposed || revision != _settingsRevision) return;
-      _enabled = enabled;
-      if (enabled) await _reconcile(requestPermission: false);
-    } catch (_) {
-      // Native preferences may be unavailable in tests or unsupported hosts.
-      // A failed read always defaults to no microphone access.
-    }
-  }
-
-  Future<void> setEnabled(
+  Future<void> _setEnabled(
     bool enabled, {
     bool requestPermission = false,
   }) async {
     if (_disposed) return;
-    _settingsRevision++;
+    if (enabled && !_enabled) {
+      _showingGuidance = false;
+      // A new tap can continue discussing the current destination, but an old
+      // purpose must never make a fresh conversation immediately complete.
+      _conversation = TripConversationProgress(destination: _destination);
+      _pendingRouteLaunch = false;
+      _rawTranscript = '';
+      _reply = '';
+    } else if (!enabled && _pendingRouteLaunch && !_conversation.complete) {
+      _pendingRouteLaunch = false;
+      final reasoner = _services.reasoner;
+      if (_isTransitActive && reasoner is ConversationAwareReasoner) {
+        (reasoner as ConversationAwareReasoner).updateTransitContext(
+          _transitContext,
+          resetPendingSwitch: true,
+        );
+      }
+    }
     _enabled = enabled;
     _invalidate();
     _publish(
@@ -107,43 +124,202 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
           ? (_shouldRun ? VoicePhase.preparing : VoicePhase.suspended)
           : VoicePhase.off,
     );
-    final revision = _settingsRevision;
-    // Disk/plugin latency must not delay microphone startup. Writes remain
-    // ordered so a rapid on/off sequence persists the latest user choice.
-    _preferenceWrites = _preferenceWrites
-        .then((_) => _services.preferences.writeEnabled(enabled))
-        .catchError((Object _) {});
-    if (_disposed || revision != _settingsRevision) return;
     await _reconcile(requestPermission: requestPermission);
   }
 
-  Future<void> retry() => setEnabled(true, requestPermission: true);
-
-  /// Handles a Push-to-Talk microphone button press across all phases:
-  /// - If off/error: starts a new listening turn.
-  /// - If listening and speech was already captured: flushes the utterance immediately.
-  /// - If speaking: interrupts TTS playback and starts a fresh listening turn.
-  /// - Otherwise: stops the active session.
-  Future<void> togglePushToTalk() async {
+  /// Syncs live trip telemetry so Navi adapts cleanly between idle planning
+  /// mode and ongoing in-transit guidance.
+  void updateTransitContext(
+    JourneyTransitContext context, {
+    bool preserveConversation = false,
+  }) {
     if (_disposed) return;
-    if (state.phase == VoicePhase.error || !_enabled) {
-      await setEnabled(true, requestPermission: true);
-      return;
+    final identityChanged = context.identity != _transitContext.identity;
+    final hasConversation =
+        _transitContext.identity != null ||
+        _enabled ||
+        _run != null ||
+        _destination != null ||
+        _reply.isNotEmpty;
+    _transitContext = context;
+    _isTransitActive = context.isActive;
+    if (_showingGuidance &&
+        (!context.isActive ||
+            identityChanged ||
+            context.confirmedPlaceName != null ||
+            context.destinationSuggestions?.places.isNotEmpty != true ||
+            (_guidanceToken != null &&
+                _guidanceToken != context.destinationSuggestions?.token))) {
+      _showingGuidance = false;
+      _reply = '';
+      _invalidate();
+      _publish(VoicePhase.off);
     }
-    if (state.phase == VoicePhase.listening) {
-      final speech = _run?.speech;
-      if (speech is GroqSpeechEngine && speech.flushUtterance()) {
-        return;
+    if (_destinationReadback?.request.token !=
+        context.destinationSuggestions?.token) {
+      _destinationReadback = null;
+    }
+    if (identityChanged && hasConversation && !preserveConversation) {
+      // An external trip/mode change invalidates a reply already in flight.
+      // Changes accepted from this conversation are acknowledged by the bridge
+      // so Navi can finish the answer and continue collecting its purpose.
+      _enabled = false;
+      _pendingRouteLaunch = false;
+      _destination = context.destination;
+      _purposeSummary = context.purposeSummary;
+      _isCasual = context.isCasual;
+      _checklist = context.checklist;
+      _rawTranscript = '';
+      _reply = '';
+      _conversation = const TripConversationProgress();
+      final reasoner = _services.reasoner;
+      if (reasoner is ConversationAwareReasoner) {
+        (reasoner as ConversationAwareReasoner).clearTripContext();
       }
-      await setEnabled(false);
-      return;
+      _invalidate();
+      _publish(VoicePhase.off);
+      unawaited(_reconcile(requestPermission: false));
     }
-    if (state.phase == VoicePhase.speaking) {
-      await setEnabled(false);
-      await setEnabled(true, requestPermission: true);
-      return;
+    final dest = context.destination?.trim();
+    if (!_enabled &&
+        context.isActive &&
+        dest != null &&
+        dest.isNotEmpty &&
+        _destination?.toLowerCase() != dest.toLowerCase()) {
+      _destination = dest;
     }
-    await setEnabled(false);
+    final reasoner = _services.reasoner;
+    if (reasoner is ConversationAwareReasoner) {
+      (reasoner as ConversationAwareReasoner).updateTransitContext(context);
+    }
+  }
+
+  /// Clears trip state and agent conversation history when ending a trip.
+  Future<void> clearActiveTrip() async {
+    if (_disposed) return;
+    _isTransitActive = false;
+    _pendingRouteLaunch = false;
+    _transitContext = JourneyTransitContext(identity: _transitContext.identity);
+    _destination = null;
+    _purposeSummary = null;
+    _isCasual = false;
+    _checklist = const <String>[];
+    _rawTranscript = '';
+    _reply = '';
+    _conversation = const TripConversationProgress();
+    _showingGuidance = false;
+    final reasoner = _services.reasoner;
+    if (reasoner is ConversationAwareReasoner) {
+      (reasoner as ConversationAwareReasoner).clearTripContext();
+    }
+    await _setEnabled(false);
+  }
+
+  /// The only user activation path. A second tap always cancels the entire
+  /// session, including capture, pending replies and speech playback.
+  Future<void> toggleConversation({String? destination}) async {
+    if (_disposed) return;
+    if (!_enabled && _isTransitActive) {
+      final reasoner = _services.reasoner;
+      if (reasoner is ConversationAwareReasoner) {
+        (reasoner as ConversationAwareReasoner).updateTransitContext(
+          _transitContext,
+          resetPendingSwitch: true,
+        );
+      }
+    } else if (!_enabled &&
+        destination != null &&
+        destination.trim().isNotEmpty) {
+      final target = destination.trim();
+      if (_destination?.toLowerCase() != target.toLowerCase()) {
+        _destination = target;
+        _purposeSummary = null;
+        _isCasual = false;
+        _checklist = const [];
+      }
+      final reasoner = _services.reasoner;
+      if (reasoner is ConversationAwareReasoner) {
+        (reasoner as ConversationAwareReasoner).setDestinationContext(target);
+      }
+    }
+    await _setEnabled(!_enabled, requestPermission: !_enabled);
+  }
+
+  /// A speech-only orientation, serialized with conversation output. This never
+  /// constructs a microphone or recognizer, requests permission, or starts a
+  /// follow-up. A tap cancels it before starting the normal conversation path.
+  Future<void> announceDestinationChoices(DestinationSearchToken token) {
+    if (_disposed ||
+        _enabled ||
+        !_transitContext.isActive ||
+        !_foreground ||
+        !_visibleSurfaces.contains('journey') ||
+        token != _transitContext.destinationSuggestions?.token ||
+        token.journey != _transitContext.identity ||
+        _transitContext.confirmedPlaceName != null ||
+        _transitContext.destinationSuggestions!.places.isEmpty ||
+        _lastGuidedIntent == token.journey) {
+      return Future.value();
+    }
+    _lastGuidedIntent = token.journey;
+    _invalidate();
+    _guidanceToken = token;
+    _showingGuidance = true;
+    final generation = _generation;
+    bool current() =>
+        !_disposed && generation == _generation && _guidanceToken == token;
+    _rawTranscript = '';
+    _reply =
+        'Let’s confirm the exact destination. Choose an address below, '
+        'or tap me beside the choices and say an option number.';
+    _publish(VoicePhase.preparingReply);
+    _operations = _operations
+        .then((_) async {
+          final previous = _run;
+          _run = null;
+          await previous?.dispose();
+          await _guidance?.dispose();
+          if (!current()) return;
+          final guidance = _GuidanceOutput(_services.output());
+          _guidance = guidance;
+          final id = ++_utteranceId;
+          guidance.events = guidance.output.events.listen((event) {
+            if (!current() || event.id != id) return;
+            if (event.type == OutputEventType.started) {
+              _publish(VoicePhase.speaking);
+            } else if (event.type == OutputEventType.failed ||
+                event.type == OutputEventType.cancelled) {
+              unawaited(guidance.dispose());
+            }
+          });
+          try {
+            await guidance.whileActive(
+              guidance.output.initialize().timeout(const Duration(seconds: 10)),
+            );
+            if (!current()) return;
+            await guidance.whileActive(
+              guidance.output
+                  .speak(_reply, id: id)
+                  .timeout(const Duration(seconds: 30)),
+            );
+          } catch (_) {
+            // The visible instruction remains usable when speech is unavailable.
+          } finally {
+            await guidance.dispose();
+            if (identical(_guidance, guidance)) _guidance = null;
+            if (current()) {
+              _guidanceToken = null;
+              _publish(VoicePhase.off);
+            }
+          }
+        })
+        .catchError((Object _) {
+          if (current()) {
+            _guidanceToken = null;
+            _publish(VoicePhase.off);
+          }
+        });
+    return _operations;
   }
 
   /// Scheduled outside widget build/disposal so providers are never mutated
@@ -152,42 +328,37 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
 
   void setSurfaceVisible(String owner, bool visible) {
     if (_disposed) return;
-    final wasVisible = _homeVisible;
+    final wasVisible = _surfaceVisible;
     if (visible) {
       _visibleSurfaces.add(owner);
     } else {
       _visibleSurfaces.remove(owner);
     }
-    if (wasVisible == _homeVisible) return;
-    _prepareVisibleSpeech();
+    final dismissGuidance = owner == 'journey' && !visible && _showingGuidance;
+    if (dismissGuidance) {
+      _showingGuidance = false;
+      _reply = '';
+    }
+    if (wasVisible == _surfaceVisible && !dismissGuidance) return;
     _invalidate();
     Future.microtask(() {
       if (!_disposed) unawaited(_reconcile(requestPermission: false));
     });
   }
 
-  void setForeground(bool foreground, {bool releaseModels = true}) {
+  void setForeground(bool foreground, {bool transient = false}) {
     if (_disposed) return;
-    if (foreground == _foreground) {
-      if (!foreground && releaseModels) _services.coolSpeech?.call();
-      return;
-    }
+    // A transient inactive state includes the microphone permission dialog.
+    // True backgrounding ends capture and requires a fresh tap after return.
+    if (!foreground && transient) return;
+    if (foreground == _foreground) return;
     _foreground = foreground;
-    if (foreground || releaseModels) _prepareVisibleSpeech();
+    if (!foreground) _enabled = false;
     _invalidate();
     unawaited(_reconcile(requestPermission: false));
   }
 
   void suspendForNavigation() => setHomeVisible(false);
-
-  void _prepareVisibleSpeech() {
-    if (_homeVisible && _foreground) {
-      final warm = _services.warmSpeech;
-      if (warm != null) unawaited(warm().catchError((Object _) {}));
-    } else {
-      _services.coolSpeech?.call();
-    }
-  }
 
   void _resetAudioLevel() {
     _audioMeter.reset();
@@ -212,7 +383,15 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
   }
 
   void _invalidate() {
+    _guidanceToken = null;
+    final guidance = _guidance;
+    if (guidance != null) unawaited(guidance.dispose());
+    _destinationReadback = null;
     _generation++;
+    final reasoner = _services.reasoner;
+    if (reasoner is ConversationAwareReasoner) {
+      (reasoner as ConversationAwareReasoner).cancelPendingReply();
+    }
     _deadline?.cancel();
     _startupDeadline?.cancel();
     _resetAudioLevel();
@@ -231,12 +410,13 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
     _operations = _operations
         .then((_) async {
           if (_disposed || generation != _generation) return;
-          // Visibility and preference restoration can enqueue the same start.
+          // Visibility changes can enqueue the same start.
           // A failed run waits for an explicit retry rather than starting twice.
           if (_run != null && _runGeneration == generation) return;
           final previous = _run;
           _run = null;
           await previous?.dispose();
+          await _guidance?.dispose();
           if (_disposed || generation != _generation) return;
           if (!_shouldRun) {
             _publish(_enabled ? VoicePhase.suspended : VoicePhase.off);
@@ -274,15 +454,15 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
               (event) => _outputEvent(run, generation, event),
             );
             // Output preparation has its own result and deadline. It must not
-            // prevent a ready wake detector from opening capture.
+            // delay opening capture after a tap.
             run.prepareOutput();
             await run.whileActive(run.speech.initialize());
             if (!_current(run, generation)) return;
-            await _listen(run, generation, wakeOnly: _services.wakeRequired);
+            await _listen(run, generation);
             if (_current(run, generation)) {
               _startupDeadline?.cancel();
               developer.log(
-                'Hands-free ready in ${startup.elapsedMilliseconds}ms',
+                'Conversation ready in ${startup.elapsedMilliseconds}ms',
                 name: 'NAVI.voice',
               );
             }
@@ -309,15 +489,12 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
 
   void _publish(VoicePhase phase, {VoiceFailure? failure}) {
     if (_disposed) return;
-    final cleanedTranscript = _commands.removeWakePhrase(
-      _rawTranscript,
-      wakeDetected: _wakeTurn,
-    );
-    final effectiveTranscript =
-        cleanedTranscript.isEmpty && !_services.wakeRequired
+    final cleanedTranscript = _commands.removeWakePhrase(_rawTranscript);
+    final effectiveTranscript = cleanedTranscript.isEmpty
         ? _rawTranscript.trim()
         : cleanedTranscript;
     state = VoiceSessionState(
+      journeyIdentity: _transitContext.identity,
       enabled: _enabled,
       phase: phase,
       transcript: effectiveTranscript,
@@ -329,20 +506,19 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
       isCasual: _isCasual,
       checklist: _checklist,
       checklistRevision: _checklistRevision,
+      tripChangeRevision: _tripChangeRevision,
+      routeLaunchRevision: _routeLaunchRevision,
+      endTripRevision: _endTripRevision,
     );
   }
 
-  Future<void> _listen(
-    _VoiceRun run,
-    int generation, {
-    required bool wakeOnly,
-  }) async {
+  Future<void> _listen(_VoiceRun run, int generation) async {
     if (!_current(run, generation)) return;
     _resetAudioLevel();
     await run.stopMicrophone();
     if (!_current(run, generation)) return;
-    run.speech.setMode(wakeOnly ? SpeechMode.wake : SpeechMode.listening);
-    final audio = await run.microphone.start();
+    run.speech.setMode(SpeechMode.listening);
+    final audio = await run.whileActive(run.microphone.start());
     if (!_current(run, generation)) {
       await run.microphone.stop();
       return;
@@ -359,28 +535,8 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
     );
     _rawTranscript = '';
     _responseClock = null;
-    _wakeTurn = !wakeOnly && !_services.wakeRequired;
-    _publish(wakeOnly ? VoicePhase.armed : VoicePhase.listening);
+    _publish(VoicePhase.listening);
     _deadline?.cancel();
-    if (!wakeOnly) {
-      final timeout = _services.wakeRequired ? followUpTimeout : commandTimeout;
-      _deadline = Timer(timeout, () {
-        if (!_current(run, generation) || state.phase != VoicePhase.listening) {
-          return;
-        }
-        if (_rawTranscript.trim().isNotEmpty) {
-          unawaited(_answer(run, generation, _rawTranscript));
-        } else if (!_services.wakeRequired) {
-          unawaited(setEnabled(false));
-        } else {
-          unawaited(
-            _listen(run, generation, wakeOnly: true).catchError(
-              (Object error) => _fail(run, generation, _failure(error)),
-            ),
-          );
-        }
-      });
-    }
   }
 
   void _speechEvent(_VoiceRun run, int generation, SpeechEvent event) {
@@ -405,21 +561,9 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
         if (state.phase != VoicePhase.transcribing) return;
         _deadline?.cancel();
         _publish(VoicePhase.listening);
-        _deadline = Timer(commandTimeout, () {
-          if (_current(run, generation)) unawaited(setEnabled(false));
-        });
       case WakeDetected():
-        if (state.phase != VoicePhase.armed) return;
-        _wakeTurn = true;
-        _rawTranscript = '';
-        _publish(VoicePhase.listening);
-        _deadline?.cancel();
-        _deadline = Timer(commandTimeout, () {
-          if (_current(run, generation) &&
-              state.phase == VoicePhase.listening) {
-            unawaited(_answer(run, generation, _rawTranscript));
-          }
-        });
+        // Legacy engines cannot activate or control a tap-only conversation.
+        return;
       case TranscriptChanged(:final text):
         if (state.phase != VoicePhase.listening &&
             state.phase != VoicePhase.transcribing) {
@@ -432,16 +576,12 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
             state.phase != VoicePhase.transcribing) {
           return;
         }
-        if (!_wakeTurn && text.trim().isEmpty) {
-          if (!_services.wakeRequired) {
-            unawaited(setEnabled(false));
-          } else {
-            unawaited(
-              _listen(run, generation, wakeOnly: true).catchError(
-                (Object error) => _fail(run, generation, _failure(error)),
-              ),
-            );
-          }
+        if (text.trim().isEmpty) {
+          unawaited(
+            _listen(run, generation).catchError(
+              (Object error) => _fail(run, generation, _failure(error)),
+            ),
+          );
         } else {
           unawaited(_answer(run, generation, text));
         }
@@ -477,11 +617,36 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
     _deadline?.cancel();
     run.speech.setMode(SpeechMode.muted);
     _rawTranscript = text;
-    final wakeTurn = _wakeTurn;
     final reasoner = _services.reasoner;
     LocalReply? response;
-    if (reasoner is LocalCommandRouter) {
-      response = reasoner.route(text, wakeDetected: wakeTurn);
+    var destinationTurn = _destinationConfirmation.resolve(
+      text,
+      suggestions: _transitContext.destinationSuggestions,
+      spokenPrompt: _destinationReadback,
+    );
+    // A "yes" after an unrelated answer must not confirm an older address.
+    // Only a newly completed readback can arm the next confirmation turn.
+    _destinationReadback = null;
+    final selectionRequest = destinationTurn?.request;
+    if (selectionRequest != null) {
+      final accepted = destinationTurn!.reject
+          ? _services.destinations?.reject(selectionRequest) ?? false
+          : _services.destinations?.confirm(selectionRequest) ?? false;
+      if (!accepted) {
+        destinationTurn = const DestinationVoiceTurn(
+          'Those place matches are no longer available. Choose the current address on the map.',
+        );
+      }
+    }
+    if (destinationTurn != null) {
+      response = LocalReply(
+        LocalIntent.clarify,
+        destinationTurn.text,
+        followUp: destinationTurn.followUp,
+      );
+      _reply = response.text;
+    } else if (reasoner is LocalCommandRouter) {
+      response = reasoner.route(text);
       _applyReply(response);
     }
     _publish(VoicePhase.preparingReply);
@@ -503,7 +668,7 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
         // is already muted, and output still waits until microphone release.
         final results = await run.whileActive(
           Future.wait<Object?>([
-            reasoner.resolve(text, wakeDetected: wakeTurn),
+            reasoner.resolve(text, wakeDetected: false),
             run.stopMicrophone(),
           ]),
         );
@@ -515,17 +680,39 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
       await run.whileActive(run.outputReady);
       if (!_current(run, generation)) return;
       final id = ++_utteranceId;
-      await run.output.speak(resolved.text, id: id);
+      await run.whileActive(run.output.speak(resolved.text, id: id));
       if (!_current(run, generation)) return;
-      if (resolved.intent == LocalIntent.sleep ||
-          (!resolved.followUp && !_services.wakeRequired)) {
-        await setEnabled(false);
+      if (destinationTurn != null) {
+        final prompt = destinationTurn.prompt;
+        _destinationReadback =
+            prompt?.request.token ==
+                _transitContext.destinationSuggestions?.token
+            ? prompt
+            : null;
+        if (resolved.followUp) {
+          await _listen(run, generation);
+        } else {
+          await _setEnabled(false);
+        }
+        return;
+      }
+      if (resolved.endTrip) {
+        _endTripRevision++;
+        await _setEnabled(false);
+      } else if (_pendingRouteLaunch && _conversation.complete) {
+        _pendingRouteLaunch = false;
+        _routeLaunchRevision++;
+        await _setEnabled(false);
+      } else if (_isTransitActive && !_pendingRouteLaunch) {
+        if (resolved.intent == LocalIntent.sleep || !resolved.followUp) {
+          await _setEnabled(false);
+        } else {
+          await _listen(run, generation);
+        }
+      } else if (_conversation.complete) {
+        await _setEnabled(false);
       } else {
-        await _listen(
-          run,
-          generation,
-          wakeOnly: !resolved.followUp && _services.wakeRequired,
-        );
+        await _listen(run, generation);
       }
     } catch (error) {
       await _fail(run, generation, _failure(error));
@@ -533,6 +720,34 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
   }
 
   void _applyReply(LocalReply response) {
+    if (response.endTrip) {
+      _reply = response.text;
+      return;
+    }
+    if (response.changeTrip && response.destination != null) {
+      _pendingRouteLaunch = true;
+      _destination = response.destination!.trim();
+      _destinationRevision++;
+      _tripChangeRevision++;
+      _purposeSummary = response.purposeSummary;
+      _isCasual = response.isCasual;
+      _checklist = response.isCasual
+          ? const <String>[]
+          : List<String>.unmodifiable(response.checklist);
+      _checklistRevision++;
+      _conversation = TripConversationProgress(
+        destination: _destination,
+        purpose: response.purposeSummary,
+      );
+      _reply = response.text;
+      return;
+    }
+    if (_isTransitActive && !_pendingRouteLaunch) {
+      _reply = response.text;
+      return;
+    }
+    final previousProgress = _conversation;
+    _conversation = _conversation.apply(response);
     _reply = response.text;
     if (response.destination != null) {
       final isDifferentDestination =
@@ -540,9 +755,14 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
       _destination = response.destination;
       _destinationRevision++;
       if (isDifferentDestination) {
-        _purposeSummary = null;
-        _isCasual = false;
-        _checklist = const <String>[];
+        // Purpose can be supplied before the first destination in this session.
+        // Preserve that preparation, but never carry it across changed places.
+        if (previousProgress.destination != null ||
+            previousProgress.purpose == null) {
+          _purposeSummary = null;
+          _isCasual = false;
+          _checklist = const <String>[];
+        }
         _checklistRevision++;
       }
     }
@@ -567,6 +787,7 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
   ) async {
     if (!_current(run, generation)) return;
     run.cancelled = true;
+    _enabled = false;
     _deadline?.cancel();
     _startupDeadline?.cancel();
     _resetAudioLevel();
@@ -576,6 +797,35 @@ class VoiceSessionController extends Notifier<VoiceSessionState> {
 
   VoiceFailure _failure(Object error) =>
       error is VoiceException ? error.failure : VoiceFailure.microphone;
+}
+
+/// Shares the output factory with conversations, but owns no capture resources.
+class _GuidanceOutput {
+  _GuidanceOutput(this.output);
+  final VoiceGateway output;
+  StreamSubscription<OutputEvent>? events;
+  final _cancelled = Completer<void>();
+  Future<void>? _disposing;
+
+  Future<T> whileActive<T>(Future<T> operation) => Future.any<T>([
+    operation,
+    _cancelled.future.then<T>(
+      (_) => throw const VoiceException(VoiceFailure.interrupted),
+    ),
+  ]);
+
+  Future<void> dispose() => _disposing ??= _dispose();
+  Future<void> _dispose() async {
+    if (!_cancelled.isCompleted) _cancelled.complete();
+    await events?.cancel();
+    for (final cleanup in [output.stopSpeaking, output.dispose]) {
+      try {
+        await cleanup();
+      } catch (_) {
+        // Releasing one resource must not prevent releasing the next.
+      }
+    }
+  }
 }
 
 class _VoiceRun {

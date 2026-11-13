@@ -21,6 +21,8 @@ class LocalReply {
     this.isCasual = false,
     this.checklist = const <String>[],
     this.followUp = true,
+    this.changeTrip = false,
+    this.endTrip = false,
   });
   final LocalIntent intent;
   final String text;
@@ -29,6 +31,8 @@ class LocalReply {
   final bool isCasual;
   final List<String> checklist;
   final bool followUp;
+  final bool changeTrip;
+  final bool endTrip;
 }
 
 /// Deliberately bounded commands. Location names still need real geocoding.

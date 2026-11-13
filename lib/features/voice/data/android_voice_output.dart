@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -8,14 +9,17 @@ import '../domain/voice_types.dart';
 import 'cloud_http_client.dart';
 import 'wav_encoder.dart';
 
-/// Hybrid neural voice output:
-/// 1. Primary: Canopy Labs Orpheus (`canopylabs/orpheus-v1-english`) on Groq
-///    played natively via Android `MediaPlayer`.
-/// 2. Automatic Fallback: Android's high-quality Google neural/network TTS
-///    with utterance IDs tracked end to end.
+/// Three-tier neural voice output:
+/// 1. Primary: Canopy Labs Orpheus (`canopylabs/orpheus-v1-english`, voice `hannah`) on Groq
+///    played natively via Android `AudioTrack`.
+/// 2. Cloud Fallback: Google Cloud Text-to-Speech (`en-US-Chirp3-HD-Kore` with 1M chars/mo free).
+/// 3. Offline Fallback: Android's native high-quality neural/offline TTS.
 class AndroidVoiceOutput implements VoiceGateway {
   AndroidVoiceOutput({
     String? groqApiKey,
+    String? googleApiKey,
+    String? androidPackage,
+    String? androidCert,
     this.ttsModel = const String.fromEnvironment(
       'NAVI_GROQ_TTS_MODEL',
       defaultValue: 'canopylabs/orpheus-v1-english',
@@ -24,15 +28,31 @@ class AndroidVoiceOutput implements VoiceGateway {
       'NAVI_GROQ_TTS_VOICE',
       defaultValue: 'hannah',
     ),
+    this.googleTtsVoice = const String.fromEnvironment(
+      'NAVI_GOOGLE_TTS_VOICE',
+      defaultValue: 'en-US-Chirp3-HD-Kore',
+    ),
     CloudHttpTransport? http,
   }) : _groqApiKey =
            (groqApiKey ?? const String.fromEnvironment('GROQ_API_KEY')).trim(),
+       _googleApiKey =
+           (googleApiKey ??
+                   const String.fromEnvironment(
+                     'GOOGLE_TTS_API_KEY',
+                     defaultValue: String.fromEnvironment('GOOGLE_MAPS_API'),
+                   ))
+               .trim(),
+       _androidPackage = (androidPackage ?? '').trim(),
+       _androidCert = (androidCert ?? '').trim(),
        _http = http ?? DartIoCloudHttpTransport(),
        _ownsHttp = http == null;
 
   static const _channel = MethodChannel('navi/voice_output');
   static final _ttsEndpoint = Uri.parse(
     'https://api.groq.com/openai/v1/audio/speech',
+  );
+  static final _googleTtsEndpoint = Uri.parse(
+    'https://texttospeech.googleapis.com/v1/text:synthesize',
   );
   static const _backchannelCues = <String>[
     'Mm-hmm.',
@@ -41,14 +61,20 @@ class AndroidVoiceOutput implements VoiceGateway {
     'Right...',
   ];
   static bool _orpheusUnavailable = false;
+  static bool _googleTtsUnavailable = false;
   static bool _warmingBackchannels = false;
   static int _fillerIndex = 0;
   static DateTime? _orpheusCooldownUntil;
+  static DateTime? _googleTtsCooldownUntil;
   static final Map<String, Uint8List> _wavCache = <String, Uint8List>{};
 
   final String ttsModel;
   final String ttsVoice;
+  final String googleTtsVoice;
   String _groqApiKey;
+  String _googleApiKey;
+  String _androidPackage;
+  String _androidCert;
   final CloudHttpTransport _http;
   final bool _ownsHttp;
   final _events = StreamController<OutputEvent>.broadcast();
@@ -74,12 +100,35 @@ class AndroidVoiceOutput implements VoiceGateway {
         _groqApiKey,
       );
     }
+    if (_googleApiKey.isEmpty && _http is DartIoCloudHttpTransport) {
+      _googleApiKey = await CloudEnvConfig.resolveKey(
+        'GOOGLE_TTS_API_KEY',
+        _googleApiKey,
+      );
+      if (_googleApiKey.isEmpty) {
+        _googleApiKey = await CloudEnvConfig.resolveKey(
+          'GOOGLE_MAPS_API',
+          _googleApiKey,
+        );
+      }
+    }
+    // A tap can cancel speech-only guidance while credentials are resolving.
+    // A disposed output must never replace the next session's channel handler.
+    if (_disposed) throw const VoiceException(VoiceFailure.interrupted);
     _channel.setMethodCallHandler(_onEvent);
     _attached = true;
     try {
-      await _channel
-          .invokeMethod<void>('initialize')
+      final credentials = await _channel
+          .invokeMethod<Map<Object?, Object?>>('initialize')
           .timeout(const Duration(seconds: 15));
+      if (credentials != null) {
+        if (_androidPackage.isEmpty) {
+          _androidPackage = credentials['package']?.toString() ?? '';
+        }
+        if (_androidCert.isEmpty) {
+          _androidCert = credentials['cert']?.toString() ?? '';
+        }
+      }
       if (_disposed) throw const VoiceException(VoiceFailure.interrupted);
       _ready = true;
       unawaited(_loadDiskCachedBackchannels());
@@ -261,16 +310,128 @@ class AndroidVoiceOutput implements VoiceGateway {
         _orpheusUnavailable = true;
       }
     } catch (_) {
-      // Fall back to Android neural/network TTS seamlessly.
+      // Fall through to Google Cloud TTS or Android offline TTS.
     }
     return null;
+  }
+
+  Future<Uint8List?> _synthesizeGoogleCloudWav(String message) async {
+    final ttsInput = message.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (_googleTtsUnavailable || _googleApiKey.isEmpty || ttsInput.isEmpty) {
+      return null;
+    }
+    final cacheKey = 'google|$googleTtsVoice|$ttsInput';
+    final cached = _wavCache[cacheKey];
+    if (cached != null) return cached;
+
+    final diskFile = _diskCacheFile('google_$googleTtsVoice', ttsInput);
+    if (diskFile != null) {
+      try {
+        if (await diskFile.exists()) {
+          final diskBytes = await diskFile.readAsBytes();
+          if (diskBytes.length > 44) {
+            if (_wavCache.length >= 24) {
+              _wavCache.remove(_wavCache.keys.first);
+            }
+            _wavCache[cacheKey] = diskBytes;
+            return diskBytes;
+          }
+        }
+      } catch (_) {}
+    }
+
+    final cooldown = _googleTtsCooldownUntil;
+    if (cooldown != null && DateTime.now().isBefore(cooldown)) {
+      return null;
+    }
+
+    if (_disposed) return null;
+    try {
+      final res = await _http.postJsonBytes(
+        uri: _googleTtsEndpoint,
+        headers: {
+          'X-Goog-Api-Key': _googleApiKey,
+          if (_androidPackage.isNotEmpty) 'X-Android-Package': _androidPackage,
+          if (_androidCert.isNotEmpty) 'X-Android-Cert': _androidCert,
+        },
+        body: {
+          'input': {'text': ttsInput},
+          'voice': {'languageCode': 'en-US', 'name': googleTtsVoice},
+          'audioConfig': {
+            'audioEncoding': 'LINEAR16',
+            'sampleRateHertz': 24000,
+          },
+        },
+        timeout: const Duration(seconds: 8),
+      );
+
+      if (res.isSuccess && res.bytes.isNotEmpty) {
+        final decoded = jsonDecode(utf8.decode(res.bytes));
+        if (decoded is Map && decoded['audioContent'] is String) {
+          final rawWav = base64Decode(decoded['audioContent'] as String);
+          if (rawWav.length > 44) {
+            _googleTtsCooldownUntil = null;
+            final normalized = normalizeStreamingWav(rawWav) ?? rawWav;
+            if (_wavCache.length >= 24) {
+              _wavCache.remove(_wavCache.keys.first);
+            }
+            _wavCache[cacheKey] = normalized;
+            if (diskFile != null) {
+              unawaited(
+                diskFile
+                    .writeAsBytes(normalized, flush: true)
+                    .catchError((_) => diskFile),
+              );
+            }
+            return normalized;
+          }
+        }
+      }
+
+      if (res.statusCode == 429) {
+        _googleTtsCooldownUntil = DateTime.now().add(
+          const Duration(minutes: 5),
+        );
+      } else if (res.statusCode == 401 || res.statusCode == 403) {
+        // Cloud Text-to-Speech is blocked or disabled on this key; skip future
+        // calls in this session and fall through directly to offline TTS.
+        _googleTtsUnavailable = true;
+      }
+    } catch (_) {
+      // Fall through cleanly to Android native offline TTS.
+    }
+    return null;
+  }
+
+  /// Synthesizes speech using the 3-tier waterfall:
+  /// 1. Groq Orpheus ("hannah")
+  /// 2. Google Cloud TTS ("en-US-Chirp3-HD-Kore")
+  /// 3. Returns null to trigger native Android offline TTS
+  Future<Uint8List?> synthesizeWav(String message) async {
+    var wav = await _synthesizeOrpheusWav(message);
+    wav ??= await _synthesizeGoogleCloudWav(message);
+    return wav;
+  }
+
+  static void resetStateForTesting() {
+    _orpheusUnavailable = false;
+    _googleTtsUnavailable = false;
+    _orpheusCooldownUntil = null;
+    _googleTtsCooldownUntil = null;
+    _wavCache.clear();
+    try {
+      final dir = Directory('${Directory.systemTemp.path}/navi_tts_cache_v1');
+      if (dir.existsSync()) {
+        dir.deleteSync(recursive: true);
+      }
+    } catch (_) {}
   }
 
   @override
   Future<void> speak(String message, {required int id}) async {
     if (!_ready) await initialize();
     await stopSpeaking();
-    final wavBytes = await _synthesizeOrpheusWav(message);
+    final wavBytes = await synthesizeWav(message);
     if (_disposed) throw const VoiceException(VoiceFailure.interrupted);
     final completion = _completion = Completer<void>();
     _activeId = id;

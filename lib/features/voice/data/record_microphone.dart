@@ -34,6 +34,7 @@ class RecordMicrophone implements MicrophoneInput {
   @override
   Future<Stream<Uint8List>> start() => _serialize(() async {
     if (_running) throw StateError('Microphone already running');
+    final startup = Stopwatch()..start();
     await _audio.setOnConfigChanged((config) {
       if (config.sampleRate != 16000 ||
           config.numChannels != 1 ||
@@ -49,21 +50,31 @@ class RecordMicrophone implements MicrophoneInput {
         sampleRate: 16000,
         numChannels: 1,
         streamBufferSize: 3200,
-        autoGain: true,
-        echoCancel: false,
-        noiseSuppress: false,
+        autoGain: false,
+        echoCancel: true,
+        noiseSuppress: true,
         androidConfig: AndroidRecordConfig(
-          audioSource: AndroidAudioSource.mic,
+          audioSource: AndroidAudioSource.voiceRecognition,
         ),
         audioInterruption: AudioInterruptionMode.none,
       ),
     );
     _running = true;
+    var firstBuffer = true;
     final meter = const bool.fromEnvironment('NAVI_VOICE_DIAGNOSTICS')
         ? PcmAudioMeter()
         : null;
     return stream.map((bytes) {
       if (_formatInvalid) throw const VoiceException(VoiceFailure.microphone);
+      if (firstBuffer && bytes.isNotEmpty) {
+        firstBuffer = false;
+        if (const bool.fromEnvironment('NAVI_VOICE_DIAGNOSTICS')) {
+          developer.log(
+            'stage=mic_ready startupMs=${startup.elapsedMilliseconds}',
+            name: 'NAVI.voice',
+          );
+        }
+      }
       if (meter != null) {
         for (final levels in meter.add(bytes)) {
           developer.log(
@@ -84,14 +95,15 @@ class RecordMicrophone implements MicrophoneInput {
 
   Future<void> _stop() async {
     final recorder = _recorder;
-    _recorder = null;
-    if (recorder != null) {
-      if (_running) {
-        _running = false;
-        try {
-          await recorder.stop();
-        } catch (_) {}
-      }
+    if (recorder == null || !_running) return;
+    _running = false;
+    try {
+      // Release capture for playback, but reuse the native recorder for the
+      // next turn instead of recreating its platform channels every time.
+      await recorder.stop();
+    } catch (_) {
+      // A recorder that failed to stop must be recreated on the next start.
+      _recorder = null;
       try {
         await recorder.dispose();
       } catch (_) {}

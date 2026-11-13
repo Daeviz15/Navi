@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../features/journey/application/voice_journey_bridge.dart';
 
 import '../core/theme/navi_theme.dart';
-import '../core/theme/theme_mode_controller.dart';
 import 'router.dart';
 
 class NaviApp extends ConsumerWidget {
@@ -13,30 +12,25 @@ class NaviApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     ref.watch(voiceJourneyBridgeProvider);
-    final themeMode = ref.watch(themeModeProvider);
-    final isLight = themeMode == ThemeMode.light;
-    final systemBackground = isLight ? NaviColors.pearl : NaviColors.midnight;
 
-    // Makes the Android bottom navigation area match the chosen theme.
+    // Makes the Android bottom navigation area match Navi's dark surface.
     // The OS may override navigation-bar colouring on edge-to-edge devices.
     return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: SystemUiOverlayStyle(
+      value: const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
-        statusBarIconBrightness: isLight ? Brightness.dark : Brightness.light,
-        statusBarBrightness: isLight ? Brightness.light : Brightness.dark,
-        systemNavigationBarColor: systemBackground,
-        systemNavigationBarDividerColor: systemBackground,
-        systemNavigationBarIconBrightness: isLight
-            ? Brightness.dark
-            : Brightness.light,
+        statusBarIconBrightness: Brightness.light,
+        statusBarBrightness: Brightness.dark,
+        systemNavigationBarColor: NaviColors.midnight,
+        systemNavigationBarDividerColor: NaviColors.midnight,
+        systemNavigationBarIconBrightness: Brightness.light,
         systemNavigationBarContrastEnforced: false,
       ),
       child: MaterialApp.router(
         debugShowCheckedModeBanner: false,
         title: 'Navi',
-        theme: NaviTheme.light,
+        theme: NaviTheme.dark,
         darkTheme: NaviTheme.dark,
-        themeMode: themeMode,
+        themeMode: ThemeMode.dark,
         routerConfig: naviRouter,
       ),
     );

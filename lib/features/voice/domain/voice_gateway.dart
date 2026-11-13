@@ -1,5 +1,8 @@
 import 'dart:typed_data';
 
+import '../../journey/domain/journey_identity.dart';
+import '../../navigation/domain/destination_selection.dart';
+import '../../navigation/domain/route_progress.dart';
 import 'local_command_router.dart';
 import 'voice_types.dart';
 
@@ -19,10 +22,7 @@ abstract interface class SpeechEngine {
 }
 
 abstract interface class VoiceReasoner {
-  Future<LocalReply> resolve(
-    String utterance, {
-    required bool wakeDetected,
-  });
+  Future<LocalReply> resolve(String utterance, {required bool wakeDetected});
 }
 
 /// Playback events carry utterance IDs so late native callbacks are harmless.
@@ -34,7 +34,62 @@ abstract interface class VoiceGateway {
   Future<void> dispose();
 }
 
-abstract interface class VoicePreferences {
-  Future<bool> readEnabled();
-  Future<void> writeEnabled(bool enabled);
+/// Live snapshot of an active trip so Navi answers strictly within the ongoing
+/// route until the user ends or explicitly changes the trip.
+class JourneyTransitContext {
+  const JourneyTransitContext({
+    this.identity,
+    this.isActive = false,
+    this.destination,
+    this.confirmedPlaceName,
+    this.confirmedAddress,
+    this.destinationSuggestions,
+    this.travelModeLabel,
+    this.purposeSummary,
+    this.isCasual = false,
+    this.checklist = const <String>[],
+    this.checkedItems = const <String>{},
+    this.currentArea,
+    this.remainingDistanceMeters,
+    this.remainingDurationSeconds,
+    this.gpsQualityLabel,
+    this.isOffRoute = false,
+    this.isRoadFallback = false,
+    this.nextGuidanceSteps = const <String>[],
+    this.routeProgressStatus,
+    this.routeEstimatesStale = false,
+    this.routeRefreshing = false,
+  });
+
+  final JourneyIdentity? identity;
+  final bool isActive;
+  final String? destination;
+  final String? confirmedPlaceName;
+  final String? confirmedAddress;
+  final DestinationSuggestions? destinationSuggestions;
+  final String? travelModeLabel;
+  final String? purposeSummary;
+  final bool isCasual;
+  final List<String> checklist;
+  final Set<String> checkedItems;
+  final String? currentArea;
+  final double? remainingDistanceMeters;
+  final int? remainingDurationSeconds;
+  final String? gpsQualityLabel;
+  final bool isOffRoute;
+  final bool isRoadFallback;
+  final List<String> nextGuidanceSteps;
+  final RouteProgressStatus? routeProgressStatus;
+  final bool routeEstimatesStale, routeRefreshing;
+}
+
+/// Allows voice reasoning to track Home selection vs. active transit context.
+abstract interface class ConversationAwareReasoner {
+  void setDestinationContext(String destination);
+  void updateTransitContext(
+    JourneyTransitContext context, {
+    bool resetPendingSwitch = false,
+  });
+  void clearTripContext();
+  void cancelPendingReply();
 }

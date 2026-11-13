@@ -18,6 +18,19 @@ class CloudEnvConfig {
     return (map[name] ?? '').trim();
   }
 
+  static Future<String> resolveFirst(
+    List<String> names, {
+    String current = '',
+  }) async {
+    final trimmed = current.trim();
+    if (trimmed.isNotEmpty) return trimmed;
+    for (final name in names) {
+      final resolved = await resolveKey(name, '');
+      if (resolved.isNotEmpty) return resolved;
+    }
+    return '';
+  }
+
   static Future<Map<String, String>> _loadAssetEnv() async {
     final existing = _cached;
     if (existing != null) return existing;
@@ -96,13 +109,60 @@ abstract interface class FormCloudHttpTransport {
   });
 }
 
+abstract interface class GetCloudHttpTransport {
+  Future<CloudHttpResponse> getJson({
+    required Uri uri,
+    Map<String, String> headers = const {},
+    Duration timeout = const Duration(seconds: 8),
+  });
+}
+
+/// Resolves and caches Android package + SHA-1 headers used by Android-restricted
+/// Google Cloud API keys across Places, Routes, Geocoding, and TTS requests.
+class AndroidAppIdentity {
+  static Map<String, String>? _cachedHeaders;
+  static Future<Map<String, String>>? _pending;
+
+  static Future<Map<String, String>> resolveHeaders() async {
+    final existing = _cachedHeaders;
+    if (existing != null) return existing;
+    if (!Platform.isAndroid) return const {};
+    return _pending ??= _fetch().whenComplete(() => _pending = null);
+  }
+
+  static Future<Map<String, String>> _fetch() async {
+    try {
+      final raw = await const MethodChannel(
+        'navi/maps_configuration',
+      ).invokeMethod<Map<Object?, Object?>>('appIdentity');
+      if (raw == null) return const {};
+      final package = raw['package']?.toString().trim() ?? '';
+      final cert = raw['cert']?.toString().trim() ?? '';
+      if (package.isEmpty || cert.isEmpty) return const {};
+      final headers = Map<String, String>.unmodifiable({
+        'X-Android-Package': package,
+        'X-Android-Cert': cert,
+      });
+      _cachedHeaders = headers;
+      return headers;
+    } on PlatformException {
+      return const {};
+    } on MissingPluginException {
+      return const {};
+    }
+  }
+}
+
 final Uint8List _emptyBytes = Uint8List(0);
 
 class DartIoCloudHttpTransport
-    implements CloudHttpTransport, FormCloudHttpTransport {
+    implements
+        CloudHttpTransport,
+        FormCloudHttpTransport,
+        GetCloudHttpTransport {
   DartIoCloudHttpTransport({
     Duration connectionTimeout = const Duration(seconds: 6),
-    this.maxResponseBytes = 262144,
+    this.maxResponseBytes = 2097152, // 2 MB bound accommodates JSON audio payloads
   }) : _client = HttpClient()..connectionTimeout = connectionTimeout;
 
   static const _boundary = '----NaviVoiceBoundary7MA4YWxkTrZu0gW';
@@ -211,6 +271,21 @@ class DartIoCloudHttpTransport
     }().timeout(timeout);
   }
 
+  @override
+  Future<CloudHttpResponse> getJson({
+    required Uri uri,
+    Map<String, String> headers = const {},
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (_closed) throw const SocketException('HTTP transport is closed');
+    return () async {
+      final request = await _client.getUrl(uri);
+      headers.forEach(request.headers.set);
+      final response = await request.close();
+      return _readTextResponse(response);
+    }().timeout(timeout);
+  }
+
   Future<CloudHttpResponse> _send({
     required Uri uri,
     required Map<String, String> headers,
@@ -223,16 +298,22 @@ class DartIoCloudHttpTransport
       request.contentLength = payload.length;
       request.add(payload);
       final response = await request.close();
-      final builder = BytesBuilder(copy: false);
-      await for (final chunk in response) {
-        if (builder.length + chunk.length > maxResponseBytes) {
-          throw const FormatException('Cloud response exceeded size bound');
-        }
-        builder.add(chunk);
-      }
-      final body = utf8.decode(builder.takeBytes(), allowMalformed: true);
-      return CloudHttpResponse(response.statusCode, body);
+      return _readTextResponse(response);
     }().timeout(timeout);
+  }
+
+  Future<CloudHttpResponse> _readTextResponse(
+    HttpClientResponse response,
+  ) async {
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in response) {
+      if (builder.length + chunk.length > maxResponseBytes) {
+        throw const FormatException('Cloud response exceeded size bound');
+      }
+      builder.add(chunk);
+    }
+    final body = utf8.decode(builder.takeBytes(), allowMalformed: true);
+    return CloudHttpResponse(response.statusCode, body);
   }
 
   Uint8List _buildMultipartBody({

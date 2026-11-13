@@ -4,7 +4,10 @@
 - [Architecture](ARCHITECTURE.md)
 - [Decisions](DECISIONS.md)
 - [Lagos maps/navigation implementation plan](maps_navigation_plan.md)
+- [Trip, state and voice reliability implementation sequence](trip_reliability_implementation_plan.md)
 - [Google Maps Android setup and device checks](google_maps_setup.md)
+- [Navigation backend and physical-phone connection](../backend/README.md)
+- [Voice diagnosis and device validation](voice_response_validation.md)
 
 The material below records an earlier character experiment and is retained as history.
 

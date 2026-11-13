@@ -112,7 +112,7 @@ Nigerian Trip-Prep Reference (use when the user shares their trip purpose):
 
     // 1. Telecoms: SIM Swap / Welcome Back
     if (RegExp(
-      r'\b(?:sim\s*swap|welcome\s*back|lost\s+(?:my\s+)?sim|replace\s+(?:my\s+)?sim|damaged\s+sim|retrieve\s+(?:my\s+)?(?:line|sim|number))\b',
+      r'\b(?:sim\s*swap|swap\s+(?:(?:my|a)\s+)?sim|welcome\s*back|lost\s+(?:my\s+)?sim|replace\s+(?:my\s+)?sim|damaged\s+sim|retrieve\s+(?:my\s+)?(?:line|sim|number))\b',
     ).hasMatch(lower)) {
       return const TripPrepMatch(
         purposeSummary: 'SIM Swap / Welcome Back',

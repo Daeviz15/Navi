@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../journey/domain/journey_draft.dart';
 import '../../voice/data/cloud_http_client.dart';
 import '../domain/navigation_gateway.dart';
+import 'direct_google_navigation_gateway.dart';
 
 final navigationGatewayProvider =
     FutureProvider.autoDispose<NavigationGateway?>((ref) async {
@@ -14,13 +15,32 @@ final navigationGatewayProvider =
         'NAVI_BACKEND_URL',
         const String.fromEnvironment('NAVI_BACKEND_URL'),
       );
-      if (url.isEmpty) return null;
+      final googleKey = await CloudEnvConfig.resolveFirst(
+        const ['GOOGLE_MAPS_API_KEY', 'GOOGLE_MAPS_API'],
+        current: const String.fromEnvironment(
+          'GOOGLE_MAPS_API_KEY',
+          defaultValue: String.fromEnvironment('GOOGLE_MAPS_API'),
+        ),
+      );
+
+      if (url.isEmpty) {
+        if (googleKey.isEmpty) return null;
+        final http = DartIoCloudHttpTransport();
+        ref.onDispose(http.close);
+        return DirectGoogleNavigationGateway(apiKey: googleKey, http: http);
+      }
+
       final uri = Uri.tryParse(url);
       if (uri == null ||
           !uri.hasAuthority ||
           uri.userInfo.isNotEmpty ||
           uri.hasQuery ||
           uri.hasFragment) {
+        if (googleKey.isNotEmpty) {
+          final http = DartIoCloudHttpTransport();
+          ref.onDispose(http.close);
+          return DirectGoogleNavigationGateway(apiKey: googleKey, http: http);
+        }
         throw const NavigationFailure('not_configured');
       }
       final local =
@@ -28,6 +48,11 @@ final navigationGatewayProvider =
           uri.scheme == 'http' &&
           const ['127.0.0.1', 'localhost', '::1'].contains(uri.host);
       if (uri.scheme != 'https' && !local) {
+        if (googleKey.isNotEmpty) {
+          final http = DartIoCloudHttpTransport();
+          ref.onDispose(http.close);
+          return DirectGoogleNavigationGateway(apiKey: googleKey, http: http);
+        }
         throw const NavigationFailure('not_configured');
       }
       final http = DartIoCloudHttpTransport();
@@ -36,11 +61,18 @@ final navigationGatewayProvider =
         'NAVI_FIREBASE_API_KEY',
         const String.fromEnvironment('NAVI_FIREBASE_API_KEY'),
       );
-      return BackendNavigationGateway(
+      final backend = BackendNavigationGateway(
         base: uri,
         http: http,
         token: local ? null : FirebaseGuestToken(http, firebaseKey),
       );
+      if (local && googleKey.isNotEmpty) {
+        return FallbackNavigationGateway(
+          primary: backend,
+          fallback: DirectGoogleNavigationGateway(apiKey: googleKey, http: http),
+        );
+      }
+      return backend;
     });
 
 /// Guest-first authentication. Provider secrets never enter this client. Tokens

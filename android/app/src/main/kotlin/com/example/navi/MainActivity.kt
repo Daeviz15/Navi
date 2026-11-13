@@ -16,15 +16,17 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger, "navi/maps_configuration"
         ).also { channel ->
             channel.setMethodCallHandler { call, result ->
-                if (call.method == "isConfigured") {
-                    @Suppress("DEPRECATION")
-                    val metadata = packageManager.getApplicationInfo(
-                        packageName, PackageManager.GET_META_DATA
-                    ).metaData
-                    // Only expose configuration presence to Dart, never the key.
-                    result.success(!metadata?.getString("com.google.android.geo.API_KEY").isNullOrBlank())
-                } else {
-                    result.notImplemented()
+                when (call.method) {
+                    "isConfigured" -> {
+                        @Suppress("DEPRECATION")
+                        val metadata = packageManager.getApplicationInfo(
+                            packageName, PackageManager.GET_META_DATA
+                        ).metaData
+                        // Only expose configuration presence to Dart, never the key.
+                        result.success(!metadata?.getString("com.google.android.geo.API_KEY").isNullOrBlank())
+                    }
+                    "appIdentity" -> result.success(AndroidAppIdentity.getCredentials(this))
+                    else -> result.notImplemented()
                 }
             }
         }

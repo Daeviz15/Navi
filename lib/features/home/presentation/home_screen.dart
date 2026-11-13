@@ -5,12 +5,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../../core/theme/theme_mode_controller.dart';
-import '../../../core/widgets/navi_companion.dart';
-import '../../journey/presentation/journey_controller.dart';
+import '../../../core/widgets/interactive_navi_companion.dart';
 import '../../character/presentation/companion_controller.dart';
+import '../../journey/application/active_trip_coordinator.dart';
+import '../../journey/domain/journey_draft.dart';
+import '../../journey/presentation/journey_controller.dart';
+import '../../location/application/location_controller.dart';
+import '../../navigation/application/navigation_controller.dart';
+import '../../navigation/data/reverse_geocoder.dart';
 import '../../voice/application/voice_session_controller.dart';
-import '../../voice/domain/voice_types.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -55,9 +58,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _voice.setForeground(
       state == AppLifecycleState.resumed,
-      releaseModels: state != AppLifecycleState.inactive,
+      transient: state == AppLifecycleState.inactive,
     );
     _companion.setVisible(state == AppLifecycleState.resumed);
+    if (state != AppLifecycleState.inactive &&
+        ref.read(journeyDraftProvider).isActive) {
+      unawaited(
+        ref
+            .read(locationControllerProvider.notifier)
+            .setVisible(state == AppLifecycleState.resumed),
+      );
+    }
   }
 
   @override
@@ -82,8 +93,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     _voice.suspendForNavigation();
     context.go('/initialize');
   }
-
-  Future<void> _toggleHandsFree() => _voice.togglePushToTalk();
 
   void _showMessage(String message) {
     ScaffoldMessenger.of(context)
@@ -143,11 +152,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final light = theme.brightness == Brightness.light;
     final voice = ref.watch(voiceSessionProvider);
-    final audioLevel = ref.watch(voiceAudioLevelProvider);
-    final companion = ref.watch(companionProvider);
     final draft = ref.watch(journeyDraftProvider);
+    final isActiveTrip = draft.isActive;
+    final navigation = isActiveTrip
+        ? ref.watch(navigationControllerProvider)
+        : const NavigationState();
+    final currentArea = isActiveTrip ? ref.watch(currentAreaProvider) : null;
+    final activeTitle = navigation.selected?.name ?? draft.destination;
+    final routeSummary = navigation.routeSummary;
     ref.listen(journeyDraftProvider, (previous, next) {
       if (next.destination != previous?.destination &&
           _destination.text != next.destination) {
@@ -222,41 +235,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                         fontWeight: FontWeight.w800,
                       ),
                     ),
-                    const Spacer(),
-                    IconButton(
-                      tooltip: voice.phase == VoicePhase.error
-                          ? 'Retry hands-free'
-                          : voice.enabled
-                          ? 'Turn off hands-free'
-                          : 'Enable hands-free',
-                      onPressed: _toggleHandsFree,
-                      icon: Icon(
-                        voice.enabled
-                            ? Icons.hearing_rounded
-                            : Icons.hearing_outlined,
-                        size: 18,
-                        color: voice.enabled
-                            ? scheme.secondary
-                            : scheme.onSurfaceVariant,
-                      ),
-                    ),
-                    IconButton.outlined(
-                      tooltip: light
-                          ? 'Switch to dark mode'
-                          : 'Switch to light mode',
-                      onPressed: () => ref
-                          .read(themeModeProvider.notifier)
-                          .setLightMode(!light),
-                      style: IconButton.styleFrom(
-                        side: BorderSide(color: scheme.outlineVariant),
-                      ),
-                      icon: Icon(
-                        light
-                            ? Icons.dark_mode_outlined
-                            : Icons.light_mode_outlined,
-                        size: 17,
-                      ),
-                    ),
                   ],
                 ),
               ),
@@ -301,10 +279,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                 const SizedBox(width: 8),
                                 Flexible(
                                   child: Text(
-                                    'A LITTLE COMPANY. A BETTER JOURNEY.',
+                                    isActiveTrip
+                                        ? 'TRIP IN PROGRESS · ON THE WAY'
+                                        : 'A LITTLE COMPANY. A BETTER JOURNEY.',
                                     textAlign: TextAlign.center,
                                     style: theme.textTheme.labelSmall?.copyWith(
-                                      color: scheme.onSurfaceVariant,
+                                      color: isActiveTrip
+                                          ? scheme.secondary
+                                          : scheme.onSurfaceVariant,
                                       fontSize: 8,
                                       letterSpacing: 1.25,
                                     ),
@@ -313,52 +295,52 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                               ],
                             ),
                             const SizedBox(height: 13),
-                            Text.rich(
-                              TextSpan(
-                                text: 'Where are we\n',
-                                children: [
-                                  TextSpan(
-                                    text: 'off to today?',
-                                    style: TextStyle(color: scheme.secondary),
-                                  ),
-                                ],
+                            if (isActiveTrip)
+                              Text.rich(
+                                TextSpan(
+                                  text: 'In transit to\n',
+                                  children: [
+                                    TextSpan(
+                                      text: activeTitle,
+                                      style: TextStyle(color: scheme.secondary),
+                                    ),
+                                  ],
+                                ),
+                                textAlign: TextAlign.center,
+                                style: theme.textTheme.displaySmall,
+                              )
+                            else
+                              Text.rich(
+                                TextSpan(
+                                  text: 'Where are we\n',
+                                  children: [
+                                    TextSpan(
+                                      text: 'off to today?',
+                                      style: TextStyle(color: scheme.secondary),
+                                    ),
+                                  ],
+                                ),
+                                textAlign: TextAlign.center,
+                                style: theme.textTheme.displaySmall,
                               ),
-                              textAlign: TextAlign.center,
-                              style: theme.textTheme.displaySmall,
-                            ),
                             const SizedBox(height: 7),
                             Text(
-                              "Your plans. My company. Let's find a way.",
+                              isActiveTrip
+                                  ? [
+                                      if (currentArea != null)
+                                        'Around $currentArea',
+                                      ?routeSummary,
+                                      if (currentArea == null &&
+                                          routeSummary == null)
+                                        'Your route stays active until you end your trip.',
+                                    ].join(' · ')
+                                  : "Your plans. My company. Let's find a way.",
                               textAlign: TextAlign.center,
                               style: theme.textTheme.bodySmall,
                             ),
                             SizedBox(height: compact ? 14 : 22),
                             Center(
-                              child: NaviCompanion(
-                                size: stageSize,
-                                clip: companion.clip,
-                                activity: companion.activity,
-                                revision: companion.revision,
-                                repeat: companion.repeat,
-                                holdPose: companion.still,
-                                audioLevel: audioLevel,
-                                engaged:
-                                    companion.activity ==
-                                        CompanionActivity.listening ||
-                                    companion.activity ==
-                                        CompanionActivity.thinking ||
-                                    companion.activity ==
-                                        CompanionActivity.speaking,
-                                onCompleted: () => ref
-                                    .read(companionProvider.notifier)
-                                    .clipCompleted(companion.revision),
-                                onTap: () {
-                                  ref
-                                      .read(companionProvider.notifier)
-                                      .touched();
-                                  unawaited(_toggleHandsFree());
-                                },
-                              ),
+                              child: InteractiveNaviCompanion(size: stageSize),
                             ),
                             const SizedBox(height: 8),
                             if (voice.transcript.isNotEmpty &&
@@ -416,91 +398,105 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                               ],
                             ),
                             SizedBox(height: compact ? 22 : 30),
-                            Container(
-                              padding: const EdgeInsets.all(16),
-                              decoration: BoxDecoration(
-                                color: scheme.surface,
-                                border: Border.all(
-                                  color: scheme.outlineVariant,
+                            if (isActiveTrip)
+                              _ActiveTripCard(
+                                destination: activeTitle,
+                                address: navigation.selected?.address,
+                                travelMode: draft.travelMode,
+                                currentArea: currentArea,
+                                routeSummary: routeSummary,
+                                destinationConfirmed:
+                                    navigation.selected != null,
+                                onResumeMap: () {
+                                  _destinationFocus.unfocus();
+                                  _voice.suspendForNavigation();
+                                  context.go('/preview');
+                                },
+                                onEndTrip: () => unawaited(
+                                  ref
+                                      .read(activeTripCoordinatorProvider)
+                                      .endTrip(
+                                        expectedIdentity: draft.identity,
+                                      ),
                                 ),
-                                borderRadius: BorderRadius.circular(22),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  Row(
-                                    children: [
-                                      Icon(
-                                        Icons.trip_origin_rounded,
-                                        size: 12,
-                                        color: scheme.secondary,
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Text(
-                                        'YOUR NEXT STOP',
-                                        style: theme.textTheme.labelSmall
-                                            ?.copyWith(
-                                              color: scheme.onSurfaceVariant,
-                                              letterSpacing: 1.4,
-                                            ),
-                                      ),
-                                    ],
+                              )
+                            else
+                              Container(
+                                padding: const EdgeInsets.all(16),
+                                decoration: BoxDecoration(
+                                  color: scheme.surface,
+                                  border: Border.all(
+                                    color: scheme.outlineVariant,
                                   ),
-                                  const SizedBox(height: 13),
-                                  TextFormField(
-                                    controller: _destination,
-                                    focusNode: _destinationFocus,
-                                    textInputAction: TextInputAction.go,
-                                    textCapitalization:
-                                        TextCapitalization.words,
-                                    style: theme.textTheme.bodyMedium,
-                                    onFieldSubmitted: (_) => _continue(),
-                                    onChanged: (_) =>
-                                        _companion.userInteracted(),
-                                    decoration: InputDecoration(
-                                      hintText: 'A place, landmark or address',
-                                      prefixIcon: Icon(
-                                        Icons.search_rounded,
-                                        size: 19,
-                                        color: scheme.onSurfaceVariant,
-                                      ),
-                                      suffixIcon: IconButton(
-                                        tooltip: 'Voice input',
-                                        onPressed: _toggleHandsFree,
-                                        icon: Icon(
-                                          voice.enabled
-                                              ? Icons.mic_rounded
-                                              : Icons.mic_none_rounded,
-                                          size: 19,
+                                  borderRadius: BorderRadius.circular(22),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Icon(
+                                          Icons.trip_origin_rounded,
+                                          size: 12,
                                           color: scheme.secondary,
                                         ),
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 12),
-                                  FilledButton(
-                                    onPressed: _continue,
-                                    child: const Row(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.center,
-                                      children: [
-                                        Flexible(
-                                          child: Text(
-                                            "Let's go together",
-                                            textAlign: TextAlign.center,
-                                          ),
-                                        ),
-                                        SizedBox(width: 12),
-                                        Icon(
-                                          Icons.arrow_forward_rounded,
-                                          size: 17,
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          'YOUR NEXT STOP',
+                                          style: theme.textTheme.labelSmall
+                                              ?.copyWith(
+                                                color: scheme.onSurfaceVariant,
+                                                letterSpacing: 1.4,
+                                              ),
                                         ),
                                       ],
                                     ),
-                                  ),
-                                ],
+                                    const SizedBox(height: 13),
+                                    TextFormField(
+                                      controller: _destination,
+                                      focusNode: _destinationFocus,
+                                      textInputAction: TextInputAction.go,
+                                      textCapitalization:
+                                          TextCapitalization.words,
+                                      style: theme.textTheme.bodyMedium,
+                                      onFieldSubmitted: (_) => _continue(),
+                                      onChanged: (_) =>
+                                          _companion.userInteracted(),
+                                      decoration: InputDecoration(
+                                        hintText:
+                                            'A place, landmark or address',
+                                        prefixIcon: Icon(
+                                          Icons.search_rounded,
+                                          size: 19,
+                                          color: scheme.onSurfaceVariant,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    FilledButton(
+                                      onPressed: _continue,
+                                      child: const Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        children: [
+                                          Flexible(
+                                            child: Text(
+                                              "Let's go together",
+                                              textAlign: TextAlign.center,
+                                            ),
+                                          ),
+                                          SizedBox(width: 12),
+                                          Icon(
+                                            Icons.arrow_forward_rounded,
+                                            size: 17,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ),
                             if (draft.checklist.isNotEmpty &&
                                 !draft.isCasual) ...[
                               const SizedBox(height: 14),
@@ -514,55 +510,57 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                     .toggleChecklistItem(item),
                               ),
                             ],
-                            const SizedBox(height: 18),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    'A little inspiration',
-                                    style: theme.textTheme.bodySmall,
+                            if (!isActiveTrip) ...[
+                              const SizedBox(height: 18),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      'A little inspiration',
+                                      style: theme.textTheme.bodySmall,
+                                    ),
                                   ),
-                                ),
-                                TextButton(
-                                  onPressed: _showPlaces,
-                                  child: const Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text('Explore'),
-                                      SizedBox(width: 4),
-                                      Icon(
-                                        Icons.arrow_outward_rounded,
-                                        size: 13,
+                                  TextButton(
+                                    onPressed: _showPlaces,
+                                    child: const Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text('Explore'),
+                                        SizedBox(width: 4),
+                                        Icon(
+                                          Icons.arrow_outward_rounded,
+                                          size: 13,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  for (final place in [
+                                    'Lekki Phase 1',
+                                    'Ikeja',
+                                    'Ologolo',
+                                  ])
+                                    ActionChip(
+                                      avatar: Icon(
+                                        Icons.north_east_rounded,
+                                        size: 12,
+                                        color: scheme.onSurfaceVariant,
                                       ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                for (final place in [
-                                  'Lekki Phase 1',
-                                  'Ikeja',
-                                  'Ologolo',
-                                ])
-                                  ActionChip(
-                                    avatar: Icon(
-                                      Icons.north_east_rounded,
-                                      size: 12,
-                                      color: scheme.onSurfaceVariant,
+                                      label: Text(place),
+                                      onPressed: () => _choosePlace(place),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 5,
+                                        vertical: 4,
+                                      ),
                                     ),
-                                    label: Text(place),
-                                    onPressed: () => _choosePlace(place),
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 5,
-                                      vertical: 4,
-                                    ),
-                                  ),
-                              ],
-                            ),
+                                ],
+                              ),
+                            ],
                             const SizedBox(height: 24),
                             const Divider(),
                             const SizedBox(height: 16),
@@ -596,6 +594,108 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             },
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ActiveTripCard extends StatelessWidget {
+  const _ActiveTripCard({
+    required this.destination,
+    required this.address,
+    required this.travelMode,
+    required this.currentArea,
+    required this.routeSummary,
+    required this.destinationConfirmed,
+    required this.onResumeMap,
+    required this.onEndTrip,
+  });
+
+  final String destination;
+  final String? address;
+  final TravelMode travelMode;
+  final String? currentArea;
+  final String? routeSummary;
+  final bool destinationConfirmed;
+  final VoidCallback onResumeMap;
+  final VoidCallback onEndTrip;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final modeLabel = travelMode == TravelMode.bus ? 'By bus' : 'On foot';
+
+    return Container(
+      key: const ValueKey('active-trip-card'),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        border: Border.all(color: scheme.secondary.withValues(alpha: .45)),
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.navigation_rounded, size: 14, color: scheme.secondary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'YOUR JOURNEY · ${modeLabel.toUpperCase()}',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: scheme.secondary,
+                    letterSpacing: 1.3,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(destination, style: theme.textTheme.titleMedium),
+          if (!destinationConfirmed) ...[
+            const SizedBox(height: 5),
+            Text(
+              'Confirm the exact address on the map or with Navi.',
+              style: theme.textTheme.bodySmall,
+            ),
+          ],
+          if (address != null && address!.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(address!, style: theme.textTheme.bodySmall),
+          ],
+          if (currentArea != null || routeSummary != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              [
+                if (currentArea != null) 'Now near $currentArea',
+                if (routeSummary != null) routeSummary,
+              ].join(' · '),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurface,
+              ),
+            ),
+          ],
+          const SizedBox(height: 14),
+          FilledButton.icon(
+            key: const ValueKey('resume-map-button'),
+            onPressed: onResumeMap,
+            icon: const Icon(Icons.map_outlined, size: 17),
+            label: const Text('Resume map'),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            key: const ValueKey('home-end-trip-button'),
+            onPressed: onEndTrip,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: scheme.error,
+              side: BorderSide(color: scheme.error.withValues(alpha: .45)),
+            ),
+            icon: const Icon(Icons.flag_outlined, size: 17),
+            label: const Text('End trip'),
+          ),
+        ],
       ),
     );
   }

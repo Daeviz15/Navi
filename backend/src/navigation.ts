@@ -25,7 +25,9 @@ const googlePlaceSchema = z.object({
   id: z.string(), displayName: z.object({ text: z.string() }),
   formattedAddress: z.string(), location: coordinateSchema,
   addressComponents: z.array(z.object({
-    longText: z.string().optional(), shortText: z.string().optional(), types: z.array(z.string()),
+    // Google's protobuf JSON can omit an empty repeated field. An untyped
+    // component provides no service-area evidence, but is still valid data.
+    longText: z.string().optional(), shortText: z.string().optional(), types: z.array(z.string()).default([]),
   })).default([]),
 });
 

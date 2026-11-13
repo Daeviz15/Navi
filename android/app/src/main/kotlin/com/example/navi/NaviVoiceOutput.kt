@@ -208,7 +208,7 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
     }
 
     private fun initialize(result: MethodChannel.Result) {
-        if (ready) { result.success(null); return }
+        if (ready) { result.success(AndroidAppIdentity.getCredentials(context)); return }
         if (initializing != null) {
             result.error("voice_busy", "Voice is already initializing.", null); return
         }
@@ -262,7 +262,7 @@ class NaviVoiceOutput(context: Context, messenger: BinaryMessenger) :
                 override fun onStop(id: String, interrupted: Boolean) = emit("cancelled", id)
             })
             ready = true
-            pending.success(null)
+            pending.success(AndroidAppIdentity.getCredentials(context))
         } }, "com.google.android.tts")
     }
 
